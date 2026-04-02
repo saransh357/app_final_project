@@ -20,6 +20,22 @@ log = logging.getLogger("CryptoAPI")
 app = Flask("CryptoAPI")
 CORS(app)
 
+# Always return JSON errors — never HTML pages
+@app.errorhandler(400)
+def err400(e): return jsonify({"error": "Bad request", "detail": str(e)}), 400
+@app.errorhandler(401)
+def err401(e): return jsonify({"error": "Unauthorized"}), 401
+@app.errorhandler(403)
+def err403(e): return jsonify({"error": "Forbidden"}), 403
+@app.errorhandler(404)
+def err404(e): return jsonify({"error": "Not found"}), 404
+@app.errorhandler(405)
+def err405(e): return jsonify({"error": "Method not allowed"}), 405
+@app.errorhandler(429)
+def err429(e): return jsonify({"error": "Too many requests"}), 429
+@app.errorhandler(500)
+def err500(e): return jsonify({"error": "Internal server error", "detail": str(e)}), 500
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE NOT NULL, name TEXT NOT NULL, tier TEXT NOT NULL DEFAULT 'free', created_at TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL REFERENCES customers(id), key_hash TEXT UNIQUE NOT NULL, key_prefix TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT, label TEXT DEFAULT 'default');
@@ -892,54 +908,71 @@ function copyCode(btn, id) {
 // ── Live API tester ────────────────────────────────────────────────────────────
 let lastEncResult = null;
 
+// Safe fetch that always returns {ok, status, data} — never throws on non-JSON
+async function apiFetch(path, options) {
+  const r = await fetch(path, options);
+  const ct = r.headers.get('Content-Type') || '';
+  let data;
+  if (ct.includes('application/json')) {
+    data = await r.json();
+  } else {
+    const txt = await r.text();
+    // Surface a readable message instead of raw HTML
+    const match = txt.match(/<title>([^<]*)<\/title>/i);
+    data = { error: match ? match[1] : `HTTP ${r.status} — server returned non-JSON response` };
+  }
+  return { ok: r.ok, status: r.status, data };
+}
+
 async function liveEncrypt() {
   const key   = document.getElementById('live-key').value.trim();
-  const plain = document.getElementById('enc-plain').value;
+  const plain = document.getElementById('enc-plain').value.trim();
   const out   = document.getElementById('enc-out');
-  if (!key) { out.textContent = 'Enter your API key first.'; out.className = 'try-output error'; return; }
+  if (!key)   { out.textContent = '⚠ Paste your API key above first.'; out.className = 'try-output error'; return; }
+  if (!plain) { out.textContent = '⚠ Enter some text to encrypt.';     out.className = 'try-output error'; return; }
   out.className = 'try-output'; out.textContent = 'Encrypting…';
   try {
-    const r = await fetch('/v1/encrypt', {
+    const { ok, data } = await apiFetch('/v1/encrypt', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ plaintext: plain })
     });
-    const d = await r.json();
-    if (r.ok) {
-      lastEncResult = d;
-      document.getElementById('dec-cipher').value = JSON.stringify(d, null, 2);
+    if (ok) {
+      lastEncResult = data;
+      document.getElementById('dec-cipher').value = JSON.stringify(data, null, 2);
       out.className = 'try-output success';
-      out.textContent = JSON.stringify(d, null, 2);
+      out.textContent = JSON.stringify(data, null, 2);
     } else {
       out.className = 'try-output error';
-      out.textContent = JSON.stringify(d, null, 2);
+      out.textContent = '✗ ' + (data.error || JSON.stringify(data, null, 2));
     }
-  } catch(e) { out.className = 'try-output error'; out.textContent = String(e); }
+  } catch(e) { out.className = 'try-output error'; out.textContent = '✗ Network error: ' + String(e); }
 }
 
 async function liveDecrypt() {
-  const key   = document.getElementById('live-key').value.trim();
-  const raw   = document.getElementById('dec-cipher').value.trim();
-  const out   = document.getElementById('dec-out');
-  if (!key) { out.textContent = 'Enter your API key first.'; out.className = 'try-output error'; return; }
+  const key = document.getElementById('live-key').value.trim();
+  const raw = document.getElementById('dec-cipher').value.trim();
+  const out = document.getElementById('dec-out');
+  if (!key) { out.textContent = '⚠ Paste your API key above first.'; out.className = 'try-output error'; return; }
+  if (!raw) { out.textContent = '⚠ Encrypt something first, or paste a JSON object with ciphertext + nonce.'; out.className = 'try-output error'; return; }
   let body;
-  try { body = JSON.parse(raw); } catch(e) { out.className = 'try-output error'; out.textContent = 'Invalid JSON in decrypt input.'; return; }
+  try { body = JSON.parse(raw); } catch(e) { out.className = 'try-output error'; out.textContent = '✗ Invalid JSON — paste the full encrypt response here.'; return; }
+  if (!body.ciphertext || !body.nonce) { out.className = 'try-output error'; out.textContent = '✗ JSON must contain both "ciphertext" and "nonce" fields.'; return; }
   out.className = 'try-output'; out.textContent = 'Decrypting…';
   try {
-    const r = await fetch('/v1/decrypt', {
+    const { ok, data } = await apiFetch('/v1/decrypt', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ ciphertext: body.ciphertext, nonce: body.nonce })
     });
-    const d = await r.json();
-    if (r.ok) {
+    if (ok) {
       out.className = 'try-output success';
-      out.textContent = d.plaintext || JSON.stringify(d, null, 2);
+      out.textContent = data.plaintext ?? JSON.stringify(data, null, 2);
     } else {
       out.className = 'try-output error';
-      out.textContent = JSON.stringify(d, null, 2);
+      out.textContent = '✗ ' + (data.error || JSON.stringify(data, null, 2));
     }
-  } catch(e) { out.className = 'try-output error'; out.textContent = String(e); }
+  } catch(e) { out.className = 'try-output error'; out.textContent = '✗ Network error: ' + String(e); }
 }
 
 // ── Scroll reveal ──────────────────────────────────────────────────────────────
