@@ -1,41 +1,25 @@
 """
 CryptoAPI — Key Issuance & Encryption-as-a-Service (Tunnel Edition)
-========================================================================
-Architecture:
-  Customer → HTTP → [app.py (Render)] → HTTP → [Ngrok Tunnel] → [ws_bridge.py (Local)] → Key
+Architecture: Customer → HTTP → [app.py (Render)] → HTTP → [Ngrok Tunnel] → [ws_bridge.py (Local)] → Key
 """
-
-import os
-import sqlite3
-import secrets
-import hashlib
-import hmac
-import time
-import json
-import logging
+import os, sqlite3, secrets, hashlib, hmac, time, logging
 from datetime import datetime, timezone
-
 import requests
 from flask import Flask, request, jsonify, g, abort
 from flask_cors import CORS
 
-# ── Config ────────────────────────────────────────────────────────────────────
 RELAY_TOKEN       = os.getenv("RELAY_TOKEN", "60214a27a9f1ee39361b70b3fa8c98d6")
-ADMIN_SECRET      = os.getenv("ADMIN_SECRET", "super_secret_admin_pass")
+ADMIN_SECRET      = os.getenv("ADMIN_SECRET", "QWErty#1")
 DB_PATH           = os.getenv("DB_PATH", "cryptoapi.db")
 DYNAMIC_RELAY_URL = os.getenv("RELAY_URL", "") # Updated dynamically by the launcher
 
-FREE_QUOTA_DAY = 100
-PRO_QUOTA_DAY  = 10_000
-KEY_PREFIX     = "ck_live_"
-
+FREE_QUOTA_DAY, PRO_QUOTA_DAY, KEY_PREFIX = 100, 10_000, "ck_live_"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("CryptoAPI")
 
 app = Flask("CryptoAPI")
 CORS(app)
 
-# ── Database ──────────────────────────────────────────────────────────────────
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE NOT NULL, name TEXT NOT NULL, tier TEXT NOT NULL DEFAULT 'free', created_at TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL REFERENCES customers(id), key_hash TEXT UNIQUE NOT NULL, key_prefix TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT, label TEXT DEFAULT 'default');
@@ -60,7 +44,6 @@ def init_db():
         db = sqlite3.connect(DB_PATH)
         db.executescript(SCHEMA)
         db.commit()
-        db.close()
 
 def mint_key():
     raw = KEY_PREFIX + secrets.token_urlsafe(32)
@@ -69,28 +52,23 @@ def mint_key():
 def today(): return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 def now_iso(): return datetime.now(timezone.utc).isoformat()
 
-# ── Auth & Usage ──────────────────────────────────────────────────────────────
 def require_api_key(f):
     from functools import wraps
     @wraps(f)
     def decorated(*args, **kwargs):
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer "): return jsonify({"error": "Missing Authorization header"}), 401
-        raw_key = auth[7:]
-        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        key_hash = hashlib.sha256(auth[7:].encode()).hexdigest()
         
-        db = get_db()
-        row = db.execute("SELECT k.id, k.customer_id, c.tier, c.active, k.revoked_at FROM api_keys k JOIN customers c ON c.id = k.customer_id WHERE k.key_hash = ?", (key_hash,)).fetchone()
+        row = get_db().execute("SELECT k.id, k.customer_id, c.tier, c.active, k.revoked_at FROM api_keys k JOIN customers c ON c.id = k.customer_id WHERE k.key_hash = ?", (key_hash,)).fetchone()
         
         if not row: return jsonify({"error": "Invalid API key"}), 401
         if row["revoked_at"]: return jsonify({"error": "API key revoked"}), 401
         if not row["active"]: return jsonify({"error": "Account suspended"}), 403
 
         quota = FREE_QUOTA_DAY if row["tier"] == "free" else PRO_QUOTA_DAY
-        cnt_row = db.execute("SELECT count FROM daily_counts WHERE key_id=? AND day=?", (row["id"], today())).fetchone()
-        current = cnt_row["count"] if cnt_row else 0
-
-        if current >= quota: return jsonify({"error": "Daily quota exceeded"}), 429
+        cnt_row = get_db().execute("SELECT count FROM daily_counts WHERE key_id=? AND day=?", (row["id"], today())).fetchone()
+        if (cnt_row["count"] if cnt_row else 0) >= quota: return jsonify({"error": "Daily quota exceeded"}), 429
 
         g.key_id, g.customer_id, g.tier, g.t0 = row["id"], row["customer_id"], row["tier"], time.monotonic()
         return f(*args, **kwargs)
@@ -98,39 +76,23 @@ def require_api_key(f):
 
 def log_usage(endpoint: str, status: int):
     if not hasattr(g, "key_id"): return
-    latency = int((time.monotonic() - g.t0) * 1000)
-    db = get_db()
-    db.execute("INSERT INTO usage_log (key_id, endpoint, ts, status, latency_ms) VALUES (?, ?, ?, ?, ?)", (g.key_id, endpoint, now_iso(), status, latency))
-    db.execute("INSERT INTO daily_counts (key_id, day, count) VALUES (?, ?, 1) ON CONFLICT(key_id, day) DO UPDATE SET count = count + 1", (g.key_id, today()))
-    db.commit()
-
-def require_admin(f):
-    from functools import wraps
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if not hmac.compare_digest(request.headers.get("X-Admin-Secret", ""), ADMIN_SECRET): abort(403)
-        return f(*args, **kwargs)
-    return decorated
+    get_db().execute("INSERT INTO usage_log (key_id, endpoint, ts, status, latency_ms) VALUES (?, ?, ?, ?, ?)", (g.key_id, endpoint, now_iso(), status, int((time.monotonic() - g.t0) * 1000)))
+    get_db().execute("INSERT INTO daily_counts (key_id, day, count) VALUES (?, ?, 1) ON CONFLICT(key_id, day) DO UPDATE SET count = count + 1", (g.key_id, today()))
+    get_db().commit()
 
 # ── Tunnel Proxy Logic ────────────────────────────────────────────────────────
 def relay_request(path: str, method: str = "GET", body: dict = None):
-    if not RELAY_TOKEN: return None, {"error": "Relay not configured"}, 503
-    if not DYNAMIC_RELAY_URL: return None, {"error": "Local bridge is offline (No tunnel URL set)"}, 503
-
-    headers = {"X-Relay-Token": RELAY_TOKEN, "Content-Type": "application/json"}
+    if not DYNAMIC_RELAY_URL: return None, {"error": "Local engine offline (No tunnel URL set)"}, 503
     try:
         url = DYNAMIC_RELAY_URL.rstrip("/") + path
-        resp = requests.request(method, url, headers=headers, json=body, timeout=20)
+        resp = requests.request(method, url, headers={"X-Relay-Token": RELAY_TOKEN, "Content-Type": "application/json"}, json=body, timeout=20)
         return resp, resp.json(), resp.status_code
-    except requests.exceptions.ConnectionError:
-        return None, {"error": "Cannot reach local bridge tunnel"}, 503
-    except Exception as e:
-        return None, {"error": str(e)}, 500
+    except Exception as e: return None, {"error": str(e)}, 500
 
-# ── Dynamic Tunnel Routing (Admin) ─────────────────────────────────────────────
+# ── Dynamic Tunnel Routing (Called by Launcher) ────────────────────────────────
 @app.route("/admin/set_relay", methods=["POST"])
-@require_admin
 def set_relay():
+    if not hmac.compare_digest(request.headers.get("X-Admin-Secret", ""), ADMIN_SECRET): abort(403)
     global DYNAMIC_RELAY_URL
     new_url = (request.get_json(force=True) or {}).get("url")
     if not new_url: return jsonify({"error": "Missing URL"}), 400
@@ -139,28 +101,11 @@ def set_relay():
     return jsonify({"message": "Relay updated", "url": DYNAMIC_RELAY_URL})
 
 # ── Customer API ──────────────────────────────────────────────────────────────
-@app.route("/v1/register", methods=["POST"])
-def register():
-    body = request.get_json(force=True) or {}
-    email, name = body.get("email", "").strip().lower(), body.get("name", "").strip()
-    if not email or "@" not in email: return jsonify({"error": "Valid email required"}), 400
-    db = get_db()
-    try:
-        cur = db.execute("INSERT INTO customers (email, name, created_at) VALUES (?, ?, ?)", (email, name, now_iso()))
-        customer_id = cur.lastrowid
-    except sqlite3.IntegrityError: return jsonify({"error": "Email registered"}), 409
-
-    raw, key_hash, prefix = mint_key()
-    db.execute("INSERT INTO api_keys (customer_id, key_hash, key_prefix, created_at) VALUES (?, ?, ?, ?)", (customer_id, key_hash, prefix, now_iso()))
-    db.commit()
-    return jsonify({"message": "Account created", "email": email, "api_key": raw}), 201
-
 @app.route("/v1/encrypt", methods=["POST"])
 @require_api_key
 def encrypt():
     body = request.get_json(force=True) or {}
-    if "plaintext" not in body: return jsonify({"error": "Missing 'plaintext'"}), 400
-    _, data, status = relay_request("/relay/encrypt", "POST", {"plaintext": body["plaintext"]})
+    _, data, status = relay_request("/relay/encrypt", "POST", {"plaintext": body.get("plaintext")})
     log_usage("/v1/encrypt", status)
     return jsonify(data), status
 
@@ -173,8 +118,7 @@ def decrypt():
     return jsonify(data), status
 
 @app.route("/health")
-def health():
-    return jsonify({"status": "ok", "tunnel_active": bool(DYNAMIC_RELAY_URL)})
+def health(): return jsonify({"status": "ok", "tunnel_active": bool(DYNAMIC_RELAY_URL)})
 
 if __name__ == "__main__":
     init_db()
