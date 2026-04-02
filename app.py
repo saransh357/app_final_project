@@ -830,25 +830,48 @@ print(plain[<span class="c-str">"plaintext"</span>])  <span class="c-cmt"># → 
   <section id="try" style="padding: 4rem 0;" class="reveal">
     <div class="section-label">Interactive</div>
     <div class="section-title">Try it live.</div>
-    <p style="color:var(--muted); margin-bottom:1.5rem; font-size:0.9rem;">Paste your Bearer key and test encryption in the browser.</p>
+    <p style="color:var(--muted); margin-bottom:1.5rem; font-size:0.9rem;">
+      Test encrypt &amp; decrypt right here. Enter your key once — it stays for the session.
+    </p>
 
-    <div style="margin-bottom:1rem;">
-      <div class="try-label">Your API Key</div>
-      <input type="text" id="live-key" placeholder="ck_live_…" autocomplete="off" spellcheck="false">
+    <div id="key-entry-row" style="margin-bottom:1.25rem;">
+      <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;">
+        <input type="text" id="live-key-input" placeholder="Paste your API key (ck_live_…)"
+               autocomplete="off" spellcheck="false"
+               style="flex:1;min-width:240px;font-family:Space Mono,monospace;font-size:0.82rem;"
+               onkeydown="if(event.key==='Enter')saveKey()">
+        <button class="btn btn-primary" style="padding:0.6rem 1.25rem;font-size:0.85rem;white-space:nowrap;"
+                onclick="saveKey()">Use this key &#8594;</button>
+      </div>
+      <p style="font-size:0.75rem;color:var(--muted);margin-top:0.5rem;">
+        No key yet? Ask an admin or use the <span style="color:var(--green);font-family:monospace">/admin/register</span> endpoint.
+      </p>
+    </div>
+
+    <div id="key-active-row" style="display:none;margin-bottom:1.25rem;">
+      <div style="display:inline-flex;align-items:center;gap:0.75rem;padding:0.6rem 1rem;
+                  background:rgba(0,229,160,0.07);border:1px solid rgba(0,229,160,0.25);border-radius:8px;">
+        <div style="width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green);flex-shrink:0;"></div>
+        <span style="font-family:Space Mono,monospace;font-size:0.78rem;color:var(--green);" id="key-active-label">ck_live_…</span>
+        <button onclick="clearKey()"
+                style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:0.75rem;padding:0 0.25rem;">
+          &#x2715; change
+        </button>
+      </div>
     </div>
 
     <div class="try-grid">
       <div class="try-panel">
         <div class="try-label">Encrypt</div>
         <textarea id="enc-plain" rows="4" placeholder="Enter text to encrypt…">Hello, ChaosKey!</textarea>
-        <button class="try-btn" onclick="liveEncrypt()">Encrypt →</button>
-        <div class="try-output" id="enc-out">Output will appear here…</div>
+        <button class="try-btn" onclick="liveEncrypt()">Encrypt &#8594;</button>
+        <div class="try-output" id="enc-out">Enter your API key above, then click Encrypt.</div>
       </div>
       <div class="try-panel">
         <div class="try-label">Decrypt</div>
-        <textarea id="dec-cipher" rows="4" placeholder="Paste ciphertext (JSON with ciphertext + nonce)…"></textarea>
-        <button class="try-btn" onclick="liveDecrypt()">Decrypt →</button>
-        <div class="try-output" id="dec-out">Output will appear here…</div>
+        <textarea id="dec-cipher" rows="4" placeholder="Encrypt something — the result auto-fills here."></textarea>
+        <button class="try-btn" onclick="liveDecrypt()">Decrypt &#8594;</button>
+        <div class="try-output" id="dec-out">Decrypted text will appear here.</div>
       </div>
     </div>
   </section>
@@ -905,40 +928,72 @@ function copyCode(btn, id) {
   });
 }
 
-// ── Live API tester ────────────────────────────────────────────────────────────
-let lastEncResult = null;
+// ── API key persistence (session only — never written to disk) ─────────────────
+let _apiKey = sessionStorage.getItem('ck_api_key') || '';
 
-// Safe fetch that always returns {ok, status, data} — never throws on non-JSON
+function saveKey() {
+  const val = document.getElementById('live-key-input').value.trim();
+  if (!val) return;
+  _apiKey = val;
+  sessionStorage.setItem('ck_api_key', val);
+  renderKeyState();
+}
+
+function clearKey() {
+  _apiKey = '';
+  sessionStorage.removeItem('ck_api_key');
+  renderKeyState();
+}
+
+function renderKeyState() {
+  const entryRow  = document.getElementById('key-entry-row');
+  const activeRow = document.getElementById('key-active-row');
+  const label     = document.getElementById('key-active-label');
+  if (_apiKey) {
+    entryRow.style.display  = 'none';
+    activeRow.style.display = 'block';
+    // Show first 16 chars + ellipsis so the key isn't fully exposed
+    label.textContent = _apiKey.length > 20 ? _apiKey.slice(0, 20) + '…' : _apiKey;
+  } else {
+    entryRow.style.display  = 'block';
+    activeRow.style.display = 'none';
+    document.getElementById('live-key-input').value = '';
+  }
+}
+
+// Restore on page load
+renderKeyState();
+
+// ── Live API tester ────────────────────────────────────────────────────────────
+
+// Safe fetch — never blindly calls .json(); handles HTML error pages gracefully
 async function apiFetch(path, options) {
-  const r = await fetch(path, options);
+  const r  = await fetch(path, options);
   const ct = r.headers.get('Content-Type') || '';
   let data;
   if (ct.includes('application/json')) {
     data = await r.json();
   } else {
-    const txt = await r.text();
-    // Surface a readable message instead of raw HTML
+    const txt   = await r.text();
     const match = txt.match(/<title>([^<]*)<\/title>/i);
-    data = { error: match ? match[1] : `HTTP ${r.status} — server returned non-JSON response` };
+    data = { error: match ? match[1] : 'HTTP ' + r.status + ' — server returned a non-JSON response' };
   }
   return { ok: r.ok, status: r.status, data };
 }
 
 async function liveEncrypt() {
-  const key   = document.getElementById('live-key').value.trim();
-  const plain = document.getElementById('enc-plain').value.trim();
   const out   = document.getElementById('enc-out');
-  if (!key)   { out.textContent = '⚠ Paste your API key above first.'; out.className = 'try-output error'; return; }
-  if (!plain) { out.textContent = '⚠ Enter some text to encrypt.';     out.className = 'try-output error'; return; }
+  const plain = document.getElementById('enc-plain').value.trim();
+  if (!_apiKey) { out.textContent = '⚠ Enter your API key above first.'; out.className = 'try-output error'; return; }
+  if (!plain)   { out.textContent = '⚠ Enter some text to encrypt.';     out.className = 'try-output error'; return; }
   out.className = 'try-output'; out.textContent = 'Encrypting…';
   try {
     const { ok, data } = await apiFetch('/v1/encrypt', {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+      headers: { 'Authorization': 'Bearer ' + _apiKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({ plaintext: plain })
     });
     if (ok) {
-      lastEncResult = data;
       document.getElementById('dec-cipher').value = JSON.stringify(data, null, 2);
       out.className = 'try-output success';
       out.textContent = JSON.stringify(data, null, 2);
@@ -950,19 +1005,23 @@ async function liveEncrypt() {
 }
 
 async function liveDecrypt() {
-  const key = document.getElementById('live-key').value.trim();
-  const raw = document.getElementById('dec-cipher').value.trim();
   const out = document.getElementById('dec-out');
-  if (!key) { out.textContent = '⚠ Paste your API key above first.'; out.className = 'try-output error'; return; }
-  if (!raw) { out.textContent = '⚠ Encrypt something first, or paste a JSON object with ciphertext + nonce.'; out.className = 'try-output error'; return; }
+  const raw = document.getElementById('dec-cipher').value.trim();
+  if (!_apiKey) { out.textContent = '⚠ Enter your API key above first.'; out.className = 'try-output error'; return; }
+  if (!raw)     { out.textContent = '⚠ Encrypt something first, or paste JSON with ciphertext + nonce.'; out.className = 'try-output error'; return; }
   let body;
-  try { body = JSON.parse(raw); } catch(e) { out.className = 'try-output error'; out.textContent = '✗ Invalid JSON — paste the full encrypt response here.'; return; }
-  if (!body.ciphertext || !body.nonce) { out.className = 'try-output error'; out.textContent = '✗ JSON must contain both "ciphertext" and "nonce" fields.'; return; }
+  try { body = JSON.parse(raw); }
+  catch(e) { out.className = 'try-output error'; out.textContent = '✗ Invalid JSON — paste the full encrypt response here.'; return; }
+  if (!body.ciphertext || !body.nonce) {
+    out.className = 'try-output error';
+    out.textContent = '✗ JSON must contain both "ciphertext" and "nonce" fields.';
+    return;
+  }
   out.className = 'try-output'; out.textContent = 'Decrypting…';
   try {
     const { ok, data } = await apiFetch('/v1/decrypt', {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+      headers: { 'Authorization': 'Bearer ' + _apiKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({ ciphertext: body.ciphertext, nonce: body.nonce })
     });
     if (ok) {
