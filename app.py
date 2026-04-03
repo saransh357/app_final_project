@@ -121,7 +121,6 @@ def set_relay():
 
 @app.route("/admin/register", methods=["POST"])
 def admin_register():
-    """Admin-only: Register a new customer and issue an API key."""
     if not hmac.compare_digest(request.headers.get("X-Admin-Secret", ""), ADMIN_SECRET): abort(403)
     body = request.get_json(force=True) or {}
     email = body.get("email", "").strip().lower()
@@ -174,7 +173,6 @@ def admin_stats():
 
 @app.route("/v1/keys", methods=["POST"])
 def issue_key():
-    """Issue a new API key for an existing customer (authenticated by existing key)."""
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "): return jsonify({"error": "Missing Authorization header"}), 401
     key_hash = hashlib.sha256(auth[7:].encode()).hexdigest()
@@ -227,9 +225,15 @@ def encrypt():
 @require_api_key
 def decrypt():
     body = request.get_json(force=True) or {}
-    if not {"ciphertext", "nonce"}.issubset(body): return jsonify({"error": "Missing ciphertext or nonce"}), 400
-    _, data, status = relay_request("/relay/decrypt", "POST",
-                                    {"ciphertext": body.get("ciphertext"), "nonce": body.get("nonce")})
+    # Make sure we demand the unique_encryption_key now
+    if not {"ciphertext", "nonce", "unique_encryption_key"}.issubset(body): 
+        return jsonify({"error": "Missing ciphertext, nonce, or unique_encryption_key"}), 400
+        
+    _, data, status = relay_request("/relay/decrypt", "POST", {
+        "ciphertext": body.get("ciphertext"), 
+        "nonce": body.get("nonce"),
+        "unique_encryption_key": body.get("unique_encryption_key")
+    })
     log_usage("/v1/decrypt", status)
     return jsonify(data), status
 
@@ -254,11 +258,10 @@ def health():
     return jsonify({"status": "ok", "tunnel_active": bool(DYNAMIC_RELAY_URL)})
 
 
-# ── Public self-signup (no admin needed) ──────────────────────────────────────
+# ── Public self-signup ──────────────────────────────────────
 
 @app.route("/v1/register", methods=["POST"])
 def public_register():
-    """Anyone can sign up and get a free API key instantly."""
     body  = request.get_json(force=True) or {}
     email = body.get("email", "").strip().lower()
     name  = body.get("name", "").strip() or email.split("@")[0]
@@ -762,11 +765,11 @@ footer{
 
 <div class="wrap">
   <section class="hero">
-    <div class="hero-eyebrow">Physical Entropy · AES-256-GCM · Zero Key Exposure</div>
+    <div class="hero-eyebrow">Physical Entropy · AES-256-GCM · Unique Keys</div>
     <h1>Your encryption key<br>born from <em>real chaos</em></h1>
     <p class="hero-lead">
       A camera watches a moving pendulum. A microphone listens to the room.<br>
-      <strong>That unpredictable motion becomes your cryptographic key</strong> — derived on a local machine, never stored in the cloud.
+      <strong>That unpredictable motion derives a unique cryptographic key per request</strong> — generated on a local machine, never stored in the cloud.
     </p>
 
     <div class="get-key-widget" id="gkw">
@@ -807,20 +810,20 @@ footer{
     <div class="flow-arrow">→</div>
     <div class="flow-step">
       <div class="flow-icon active">🌀</div>
-      <div class="flow-title">Entropy Pool</div>
-      <div class="flow-sub">20 seconds of optical flow + audio builds an unpredictable pool</div>
+      <div class="flow-title">Master Entropy</div>
+      <div class="flow-sub">20 seconds of optical flow + audio builds the master root key</div>
     </div>
     <div class="flow-arrow">→</div>
     <div class="flow-step">
       <div class="flow-icon active">🔑</div>
       <div class="flow-title">Key Derivation</div>
-      <div class="flow-sub">SHA-512 → Scrypt → HKDF-SHA256 produces a 256-bit key</div>
+      <div class="flow-sub">Master Key + 16-byte random salt creates a unique 256-bit key per request</div>
     </div>
     <div class="flow-arrow">→</div>
     <div class="flow-step">
       <div class="flow-icon">🔐</div>
       <div class="flow-title">Your API Call</div>
-      <div class="flow-sub">You send plaintext. We return AES-256-GCM ciphertext. Key never leaves our machine.</div>
+      <div class="flow-sub">You send plaintext. We return AES-256-GCM ciphertext + your unique key.</div>
     </div>
   </div>
 
@@ -877,8 +880,8 @@ footer{
           <span class="pg-pane-label">Ciphertext</span>
           <span class="pg-badge pg-badge-dec">DECRYPT</span>
         </div>
-        <p style="font-size:.75rem;color:var(--mist);line-height:1.5">After encrypting, the JSON result auto-fills here. Or paste any ciphertext + nonce to decrypt.</p>
-        <textarea id="dec-input" rows="5" placeholder='{"ciphertext":"…","nonce":"…"}'></textarea>
+        <p style="font-size:.75rem;color:var(--mist);line-height:1.5">After encrypting, the JSON result auto-fills here. Or paste any ciphertext + nonce + unique key to decrypt.</p>
+        <textarea id="dec-input" rows="5" placeholder='{"ciphertext":"…","nonce":"…","unique_encryption_key":"…"}'></textarea>
         <button class="pg-action teal-btn" onclick="doDecrypt()">Decrypt →</button>
         <textarea class="out teal" id="dec-output" rows="4" readonly placeholder="Decrypted plaintext will appear here…"></textarea>
       </div>
@@ -888,7 +891,7 @@ footer{
           <span class="pg-pane-label">Master Chaos Key</span>
           <span class="pg-badge" style="background:rgba(255,107,138,.12);color:var(--rose);border:1px solid rgba(255,107,138,.2)">EXPORT</span>
         </div>
-        <p style="font-size:.75rem;color:var(--mist);line-height:1.5">This exposes the underlying 256-bit AES key generated by the physical entropy engine. Keep this secret.</p>
+        <p style="font-size:.75rem;color:var(--mist);line-height:1.5">This exposes the underlying master 256-bit key. You shouldn't ever need this to decrypt normal traffic anymore, as each request generates a unique derived key.</p>
         <div style="display:flex; gap:1rem;">
             <button class="pg-action" style="background:transparent; border:1px solid var(--rose); color:var(--rose);" onclick="exportChaosKey()">Reveal Master Key</button>
         </div>
@@ -921,9 +924,9 @@ H    = {<span class="ts">"Authorization"</span>: <span class="ts">f"Bearer {KEY}
 r = requests.<span class="tm">post</span>(f<span class="ts">"{BASE}/v1/encrypt"</span>, headers=H,
         json={<span class="ts">"plaintext"</span>: <span class="ts">"secret data"</span>})
 enc = r.json()
-<span class="tc"># {"ciphertext": "…", "nonce": "…"}</span>
+<span class="tc"># Contains: ciphertext, nonce, unique_encryption_key</span>
 
-<span class="tc"># Decrypt</span>
+<span class="tc"># Decrypt (Pass the entire object back)</span>
 r = requests.<span class="tm">post</span>(f<span class="ts">"{BASE}/v1/decrypt"</span>, headers=H,
         json=enc)
 print(r.json()[<span class="ts">"plaintext"</span>])  <span class="tc"># → "secret data"</span></pre>
@@ -972,7 +975,7 @@ console.<span class="tm">log</span>(out.plaintext); <span class="tc">// → "sec
 <span class="tm">curl</span> <span class="tk">-X POST</span> https://your-app.onrender.com/v1/decrypt \
   <span class="tk">-H</span> <span class="ts">"Authorization: Bearer ck_live_YOUR_KEY"</span> \
   <span class="tk">-H</span> <span class="ts">"Content-Type: application/json"</span> \
-  <span class="tk">-d</span> <span class="ts">'{"ciphertext":"…","nonce":"…"}'</span></pre>
+  <span class="tk">-d</span> <span class="ts">'{"ciphertext":"…","nonce":"…","unique_encryption_key":"…"}'</span></pre>
       </div>
 
       <div class="code-card">
@@ -989,11 +992,11 @@ console.<span class="tm">log</span>(out.plaintext); <span class="tc">// → "sec
 <span class="tc"># Encrypt plaintext</span>
 <span class="tm">POST</span> /v1/encrypt  <span class="tn">[Bearer token]</span>
   body: { <span class="ts">"plaintext"</span>: <span class="ts">"…"</span> }
-  → { <span class="ts">"ciphertext"</span>: <span class="ts">"…"</span>, <span class="ts">"nonce"</span>: <span class="ts">"…"</span> }
+  → { <span class="ts">"ciphertext"</span>: <span class="ts">"…"</span>, <span class="ts">"nonce"</span>: <span class="ts">"…"</span>, <span class="ts">"unique_encryption_key"</span>: <span class="ts">"…"</span> }
 
 <span class="tc"># Decrypt ciphertext</span>
 <span class="tm">POST</span> /v1/decrypt  <span class="tn">[Bearer token]</span>
-  body: { <span class="ts">"ciphertext"</span>: <span class="ts">"…"</span>, <span class="ts">"nonce"</span>: <span class="ts">"…"</span> }
+  body: { <span class="ts">"ciphertext"</span>: <span class="ts">"…"</span>, <span class="ts">"nonce"</span>: <span class="ts">"…"</span>, <span class="ts">"unique_encryption_key"</span>: <span class="ts">"…"</span> }
   → { <span class="ts">"plaintext"</span>: <span class="ts">"…"</span> }
 
 <span class="tc"># Check your usage</span>
@@ -1243,12 +1246,19 @@ async function doDecrypt(){
   let body;
   try{body=JSON.parse(raw)}
   catch(e){out.value='✗ Invalid JSON — paste the full encrypt response.';out.className='out err';return}
-  if(!body.ciphertext||!body.nonce){out.value='✗ JSON needs both "ciphertext" and "nonce".';out.className='out err';return}
+  if(!body.ciphertext||!body.nonce||!body.unique_encryption_key){
+      out.value='✗ JSON needs "ciphertext", "nonce", and "unique_encryption_key".';
+      out.className='out err';return
+  }
   out.value='Decrypting…'; out.className='out teal';
   const {ok,data}=await apiFetch('/v1/decrypt',{
     method:'POST',
     headers:{'Authorization':'Bearer '+_key,'Content-Type':'application/json'},
-    body:JSON.stringify({ciphertext:body.ciphertext,nonce:body.nonce})
+    body:JSON.stringify({
+        ciphertext: body.ciphertext,
+        nonce: body.nonce,
+        unique_encryption_key: body.unique_encryption_key
+    })
   });
   if(ok){
     out.value=data.plaintext??JSON.stringify(data); out.className='out teal';
