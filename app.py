@@ -741,7 +741,6 @@ footer{
 
 <canvas id="entropy-canvas"></canvas>
 
-<!-- NAV -->
 <nav>
   <a href="/" class="nav-logo">
     <div class="logo-hex">⬡</div>
@@ -753,7 +752,6 @@ footer{
   </div>
 </nav>
 
-<!-- HERO -->
 <div class="wrap">
   <section class="hero">
     <div class="hero-eyebrow">Physical Entropy · AES-256-GCM · Zero Key Exposure</div>
@@ -763,7 +761,6 @@ footer{
       <strong>That unpredictable motion becomes your cryptographic key</strong> — derived on a local machine, never stored in the cloud.
     </p>
 
-    <!-- GET KEY WIDGET -->
     <div class="get-key-widget" id="gkw">
       <div class="gkw-header">
         <span class="gkw-title">Get your free API key</span>
@@ -778,7 +775,6 @@ footer{
       </div>
     </div>
 
-    <!-- KEY RESULT -->
     <div class="key-result" id="key-result">
       <div class="kr-label">Your API Key is ready</div>
       <div class="kr-key" id="kr-key-val" onclick="copyKeyResult(this)" title="Click to copy">
@@ -794,7 +790,6 @@ footer{
 
   </section>
 
-  <!-- HOW IT WORKS FLOW -->
   <div class="flow sr">
     <div class="flow-step">
       <div class="flow-icon active">🎥</div>
@@ -821,7 +816,6 @@ footer{
     </div>
   </div>
 
-  <!-- STATS -->
   <div class="stats-row sr">
     <div class="stat-cell">
       <div class="stat-n" id="s-customers">—</div>
@@ -837,7 +831,6 @@ footer{
     </div>
   </div>
 
-  <!-- PLAYGROUND -->
   <section class="section sr">
     <div class="section-tag">Playground</div>
     <div class="section-h">Encrypt something right now.</div>
@@ -845,7 +838,6 @@ footer{
 
     <div class="playground" id="playground">
 
-      <!-- Key setup row (shown when no key set) -->
       <div class="pg-key-setup" id="pg-key-setup">
         <input class="pg-setup-input" type="text" id="pg-key-input"
                placeholder="Paste your API key (ck_live_…)"
@@ -857,7 +849,6 @@ footer{
         </p>
       </div>
 
-      <!-- Encrypt pane (hidden until key set) -->
       <div class="pg-pane" id="pane-enc" style="display:none">
         <div class="pg-pane-header">
           <span class="pg-pane-label">Plaintext</span>
@@ -873,7 +864,6 @@ footer{
         <textarea class="out" id="enc-output" rows="5" readonly placeholder="Encrypted output will appear here…"></textarea>
       </div>
 
-      <!-- Decrypt pane (hidden until key set) -->
       <div class="pg-pane" id="pane-dec" style="display:none">
         <div class="pg-pane-header">
           <span class="pg-pane-label">Ciphertext</span>
@@ -888,7 +878,6 @@ footer{
     </div>
   </section>
 
-  <!-- CODE EXAMPLES -->
   <section class="section sr">
     <div class="section-tag">Integration</div>
     <div class="section-h">Copy. Paste. Done.</div>
@@ -994,9 +983,7 @@ console.<span class="tm">log</span>(out.plaintext); <span class="tc">// → "sec
     </div>
   </section>
 
-</div><!-- /wrap -->
-
-<footer>
+</div><footer>
   <div class="footer-left">
     <div class="logo-hex" style="width:24px;height:24px;font-size:11px">⬡</div>
     <span style="font-family:'DM Mono',monospace;font-size:.75rem;color:var(--dust)">ChaosKey</span>
@@ -1290,6 +1277,8 @@ def public_stats():
 def index():
     return render_template_string(DASHBOARD_HTML)
 
+# Call this so Gunicorn runs it on startup
+init_db()
+
 if __name__ == "__main__":
-    init_db()
     app.run(host="0.0.0.0", port=8000, debug=False)
