@@ -245,633 +245,751 @@ def api_status():
 def health():
     return jsonify({"status": "ok", "tunnel_active": bool(DYNAMIC_RELAY_URL)})
 
-# ── Landing / Docs UI ─────────────────────────────────────────────────────────
+
+# ── Public self-signup (no admin needed) ──────────────────────────────────────
+
+@app.route("/v1/register", methods=["POST"])
+def public_register():
+    """Anyone can sign up and get a free API key instantly."""
+    body  = request.get_json(force=True) or {}
+    email = body.get("email", "").strip().lower()
+    name  = body.get("name", "").strip() or email.split("@")[0]
+    if not email or "@" not in email:
+        return jsonify({"error": "Valid email required"}), 400
+    db = get_db()
+    try:
+        db.execute("INSERT INTO customers (email, name, tier, created_at) VALUES (?, ?, 'free', ?)",
+                   (email, name, now_iso()))
+        db.commit()
+        cust    = db.execute("SELECT id FROM customers WHERE email=?", (email,)).fetchone()
+        raw_key, key_hash, prefix = mint_key()
+        db.execute("INSERT INTO api_keys (customer_id, key_hash, key_prefix, created_at) VALUES (?, ?, ?, ?)",
+                   (cust["id"], key_hash, prefix, now_iso()))
+        db.commit()
+        return jsonify({"api_key": raw_key, "tier": "free",
+                        "quota": 100, "note": "Save this key — it won't be shown again."}), 201
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "Email already registered. Contact support to retrieve your key."}), 409
+
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ChaosKey — Encryption API</title>
+<title>ChaosKey — Encryption from Physical Entropy</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,400&family=Instrument+Serif:ital@0;1&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-:root {
-  --bg:      #050608;
-  --surface: #0d0f14;
-  --border:  #1a1e28;
-  --muted:   #3a3f52;
-  --text:    #c8cedd;
-  --bright:  #f0f4ff;
-  --green:   #00e5a0;
-  --red:     #ff4d6d;
-  --blue:    #4d8aff;
-  --amber:   #ffb347;
-  --purple:  #a78bfa;
-  --glow-g:  rgba(0,229,160,0.15);
-  --glow-b:  rgba(77,138,255,0.12);
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --ink:#08090c;--ink2:#0f1117;--ink3:#161b26;
+  --line:#1e2535;--line2:#252d3e;
+  --dust:#384158;--mist:#5a6a8a;--fog:#8898b8;
+  --paper:#c5cede;--white:#eef2fb;
+  --lime:#b8f552;--lime2:#d4ff7a;--lime3:rgba(184,245,82,.12);
+  --teal:#52e5c8;--teal3:rgba(82,229,200,.1);
+  --rose:#ff6b8a;
+  --glow-lime:0 0 40px rgba(184,245,82,.25);
+  --glow-teal:0 0 40px rgba(82,229,200,.2);
+  --r:10px;
 }
-
-html { scroll-behavior: smooth; }
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: 'Syne', sans-serif;
-  min-height: 100vh;
-  overflow-x: hidden;
+html{scroll-behavior:smooth;-webkit-font-smoothing:antialiased}
+body{
+  background:var(--ink);color:var(--paper);
+  font-family:'Outfit',sans-serif;font-weight:400;
+  min-height:100vh;overflow-x:hidden;
 }
+::selection{background:var(--lime);color:#000}
 
-/* ── Grid noise texture ── */
-body::before {
-  content: '';
-  position: fixed; inset: 0;
-  background-image:
-    linear-gradient(rgba(0,229,160,0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0,229,160,0.03) 1px, transparent 1px);
-  background-size: 40px 40px;
-  pointer-events: none; z-index: 0;
+/* ─── CANVAS BG ─── */
+#entropy-canvas{
+  position:fixed;inset:0;width:100%;height:100%;
+  pointer-events:none;z-index:0;opacity:.45;
 }
 
-/* ── Ambient orbs ── */
-.orb {
-  position: fixed; border-radius: 50%;
-  filter: blur(120px); pointer-events: none; z-index: 0;
-}
-.orb-1 { width:600px; height:600px; top:-200px; left:-200px; background: radial-gradient(circle, rgba(0,229,160,0.07), transparent 70%); animation: drift1 18s ease-in-out infinite; }
-.orb-2 { width:500px; height:500px; bottom:-100px; right:-100px; background: radial-gradient(circle, rgba(77,138,255,0.07), transparent 70%); animation: drift2 22s ease-in-out infinite; }
+/* ─── LAYOUT ─── */
+.wrap{position:relative;z-index:1;max-width:1080px;margin:0 auto;padding:0 2rem}
 
-@keyframes drift1 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(60px,40px)} }
-@keyframes drift2 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(-40px,-60px)} }
+/* ─── NAV ─── */
+nav{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:1.4rem 2.5rem;
+  position:sticky;top:0;z-index:100;
+  background:rgba(8,9,12,.8);backdrop-filter:blur(20px);
+  border-bottom:1px solid var(--line);
+}
+.nav-logo{
+  display:flex;align-items:center;gap:.75rem;
+  font-family:'DM Mono',monospace;font-size:.95rem;
+  color:var(--white);letter-spacing:-.01em;font-weight:500;
+  text-decoration:none;
+}
+.logo-hex{
+  width:34px;height:34px;
+  background:linear-gradient(135deg,var(--lime),var(--teal));
+  clip-path:polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%);
+  display:flex;align-items:center;justify-content:center;
+  font-size:15px;flex-shrink:0;
+}
+.nav-status{
+  display:flex;align-items:center;gap:.5rem;
+  font-family:'DM Mono',monospace;font-size:.72rem;
+  color:var(--mist);
+  padding:.35rem .9rem;
+  border:1px solid var(--line2);border-radius:100px;
+  transition:all .3s;
+}
+.nav-status.live{color:var(--lime);border-color:rgba(184,245,82,.3);}
+.pulse-dot{
+  width:6px;height:6px;border-radius:50%;
+  background:var(--dust);transition:background .3s,box-shadow .3s;
+}
+.pulse-dot.live{
+  background:var(--lime);
+  box-shadow:0 0 8px var(--lime);
+  animation:blink 2s ease-in-out infinite;
+}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}
 
-/* ── Layout ── */
-.wrap { position: relative; z-index: 1; max-width: 1100px; margin: 0 auto; padding: 0 2rem; }
+/* ─── HERO ─── */
+.hero{
+  padding:7rem 0 5rem;
+  text-align:center;
+  position:relative;
+}
+.hero-eyebrow{
+  display:inline-flex;align-items:center;gap:.6rem;
+  font-family:'DM Mono',monospace;font-size:.72rem;
+  color:var(--lime);letter-spacing:.12em;text-transform:uppercase;
+  padding:.4rem 1.1rem;
+  border:1px solid rgba(184,245,82,.25);
+  border-radius:100px;background:rgba(184,245,82,.06);
+  margin-bottom:2.5rem;
+}
+.hero-eyebrow::before{content:'◈';font-size:.8rem}
+h1{
+  font-family:'Instrument Serif',serif;
+  font-size:clamp(3.2rem,7.5vw,6rem);
+  line-height:1.02;letter-spacing:-.03em;
+  color:var(--white);margin-bottom:1.75rem;
+  font-weight:400;
+}
+h1 em{
+  font-style:italic;
+  background:linear-gradient(125deg,var(--lime) 0%,var(--teal) 55%,var(--lime2) 100%);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+}
+.hero-lead{
+  font-size:1.1rem;line-height:1.75;color:var(--mist);
+  max-width:560px;margin:0 auto 3.5rem;font-weight:300;
+}
+.hero-lead strong{color:var(--paper);font-weight:500}
 
-/* ── Nav ── */
-nav {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 1.5rem 2rem;
-  border-bottom: 1px solid var(--border);
-  position: sticky; top: 0; z-index: 100;
-  background: rgba(5,6,8,0.85);
-  backdrop-filter: blur(16px);
+/* ─── GET KEY WIDGET (hero CTA) ─── */
+.get-key-widget{
+  max-width:500px;margin:0 auto 2rem;
+  background:var(--ink2);
+  border:1px solid var(--line2);
+  border-radius:16px;
+  overflow:hidden;
+  box-shadow:0 20px 60px rgba(0,0,0,.5);
+  transition:box-shadow .3s;
 }
-.logo {
-  display: flex; align-items: center; gap: 0.75rem;
-  font-family: 'Space Mono', monospace;
-  font-size: 1.1rem; font-weight: 700; color: var(--bright);
-  letter-spacing: -0.02em;
+.get-key-widget:focus-within{
+  border-color:rgba(184,245,82,.35);
+  box-shadow:0 20px 60px rgba(0,0,0,.5),var(--glow-lime);
 }
-.logo-icon {
-  width: 32px; height: 32px;
-  background: linear-gradient(135deg, var(--green), var(--blue));
-  border-radius: 8px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 16px;
+.gkw-header{
+  padding:1.4rem 1.75rem 1rem;
+  border-bottom:1px solid var(--line);
+  display:flex;align-items:center;justify-content:space-between;
 }
-.nav-pill {
-  display: flex; align-items: center; gap: 0.5rem;
-  padding: 0.4rem 1rem;
-  border: 1px solid var(--border);
-  border-radius: 100px;
-  font-size: 0.8rem; font-family: 'Space Mono', monospace;
-  color: var(--muted);
+.gkw-title{font-size:.8rem;font-weight:600;color:var(--paper);letter-spacing:.04em;text-transform:uppercase}
+.gkw-free-badge{
+  font-family:'DM Mono',monospace;font-size:.68rem;
+  color:var(--lime);background:var(--lime3);
+  border:1px solid rgba(184,245,82,.2);
+  padding:.2rem .6rem;border-radius:100px;
 }
-.status-dot {
-  width: 7px; height: 7px; border-radius: 50%;
-  background: var(--muted);
-  transition: background 0.3s, box-shadow 0.3s;
+.gkw-body{padding:1.25rem 1.75rem 1.5rem;display:flex;flex-direction:column;gap:.75rem}
+.gkw-row{display:flex;gap:.6rem}
+.gkw-input{
+  flex:1;background:var(--ink3);
+  border:1px solid var(--line2);border-radius:8px;
+  color:var(--white);
+  font-family:'Outfit',sans-serif;font-size:.9rem;
+  padding:.75rem 1rem;
+  outline:none;transition:border-color .2s;
 }
-.status-dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.gkw-input::placeholder{color:var(--dust)}
+.gkw-input:focus{border-color:rgba(184,245,82,.4)}
+.gkw-btn{
+  background:var(--lime);color:#000;
+  border:none;border-radius:8px;
+  font-family:'Outfit',sans-serif;font-weight:700;font-size:.9rem;
+  padding:.75rem 1.5rem;cursor:pointer;white-space:nowrap;
+  transition:background .2s,transform .15s,box-shadow .2s;
+}
+.gkw-btn:hover{background:var(--lime2);transform:translateY(-1px);box-shadow:var(--glow-lime)}
+.gkw-btn:disabled{opacity:.4;cursor:not-allowed;transform:none;box-shadow:none}
+.gkw-msg{
+  font-family:'DM Mono',monospace;font-size:.75rem;
+  min-height:1.4rem;text-align:center;
+  transition:color .2s;color:var(--mist);
+}
+.gkw-msg.ok{color:var(--lime)}
+.gkw-msg.err{color:var(--rose)}
 
-/* ── Hero ── */
-.hero {
-  padding: 7rem 0 5rem;
-  text-align: center;
-  position: relative;
+/* ─── KEY RESULT CARD ─── */
+.key-result{
+  display:none;
+  max-width:500px;margin:0 auto 1.5rem;
+  background:linear-gradient(135deg,rgba(184,245,82,.06),rgba(82,229,200,.04));
+  border:1px solid rgba(184,245,82,.3);
+  border-radius:16px;padding:1.5rem 1.75rem;
+  animation:fadeSlide .5s ease;
 }
-.hero-badge {
-  display: inline-flex; align-items: center; gap: 0.5rem;
-  padding: 0.4rem 1rem;
-  border: 1px solid rgba(0,229,160,0.3);
-  border-radius: 100px;
-  background: rgba(0,229,160,0.06);
-  font-family: 'Space Mono', monospace;
-  font-size: 0.75rem; color: var(--green);
-  margin-bottom: 2rem;
-  letter-spacing: 0.05em;
+.key-result.show{display:block}
+@keyframes fadeSlide{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.kr-label{
+  font-family:'DM Mono',monospace;font-size:.68rem;
+  color:var(--lime);letter-spacing:.1em;text-transform:uppercase;
+  margin-bottom:.75rem;display:flex;align-items:center;gap:.5rem;
 }
-h1 {
-  font-size: clamp(3rem, 7vw, 5.5rem);
-  font-weight: 800;
-  line-height: 1.0;
-  letter-spacing: -0.04em;
-  color: var(--bright);
-  margin-bottom: 1.5rem;
+.kr-label::before{content:'✓';font-size:.9rem}
+.kr-key{
+  font-family:'DM Mono',monospace;font-size:.78rem;
+  color:var(--white);word-break:break-all;line-height:1.6;
+  background:var(--ink3);border:1px solid var(--line2);
+  border-radius:8px;padding:.85rem 1rem;margin-bottom:1rem;
+  position:relative;cursor:pointer;transition:border-color .2s;
 }
-h1 span {
-  background: linear-gradient(135deg, var(--green) 0%, var(--blue) 100%);
-  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+.kr-key:hover{border-color:rgba(184,245,82,.3)}
+.kr-copy-hint{
+  position:absolute;top:.5rem;right:.65rem;
+  font-size:.6rem;color:var(--mist);
+  transition:color .2s;
 }
-.hero-sub {
-  font-size: 1.1rem; line-height: 1.7;
-  color: var(--muted); max-width: 560px; margin: 0 auto 3rem;
+.kr-key:hover .kr-copy-hint{color:var(--lime)}
+.kr-note{font-size:.78rem;color:var(--mist);line-height:1.5}
+.kr-note strong{color:var(--rose)}
+.kr-actions{display:flex;gap:.6rem;margin-top:1rem}
+.kr-action-btn{
+  flex:1;padding:.6rem;border-radius:8px;
+  font-family:'Outfit',sans-serif;font-size:.8rem;font-weight:600;
+  cursor:pointer;transition:all .15s;border:none;
 }
-.cta-row { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
-.btn {
-  padding: 0.85rem 2rem; border-radius: 8px;
-  font-family: 'Syne', sans-serif; font-weight: 600; font-size: 0.95rem;
-  cursor: pointer; border: none; text-decoration: none;
-  display: inline-flex; align-items: center; gap: 0.5rem;
-  transition: transform 0.15s, opacity 0.15s, box-shadow 0.15s;
-}
-.btn:hover { transform: translateY(-1px); opacity: 0.92; }
-.btn-primary {
-  background: linear-gradient(135deg, var(--green), #00c8a0);
-  color: #000; box-shadow: 0 4px 20px rgba(0,229,160,0.25);
-}
-.btn-ghost {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text);
-}
-.btn-ghost:hover { border-color: var(--muted); }
+.kr-btn-primary{background:var(--lime);color:#000}
+.kr-btn-primary:hover{background:var(--lime2)}
+.kr-btn-ghost{background:var(--ink3);color:var(--paper);border:1px solid var(--line2)}
+.kr-btn-ghost:hover{border-color:var(--fog);color:var(--white)}
 
-/* ── Stats bar ── */
-.stats-bar {
-  display: grid; grid-template-columns: repeat(3, 1fr);
-  gap: 1px; background: var(--border);
-  border: 1px solid var(--border); border-radius: 12px;
-  overflow: hidden; margin: 4rem 0;
+/* ─── FLOW DIAGRAM ─── */
+.flow{
+  display:flex;align-items:center;justify-content:center;
+  gap:0;margin:5rem 0;flex-wrap:wrap;
 }
-.stat-cell {
-  background: var(--surface);
-  padding: 1.5rem 2rem;
-  text-align: center;
+.flow-step{
+  display:flex;flex-direction:column;align-items:center;gap:.75rem;
+  padding:1.5rem 1.25rem;
+  min-width:140px;
+  text-align:center;
 }
-.stat-num {
-  font-family: 'Space Mono', monospace;
-  font-size: 2rem; font-weight: 700;
-  color: var(--bright);
+.flow-icon{
+  width:52px;height:52px;border-radius:14px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:1.4rem;
+  border:1px solid var(--line2);
+  background:var(--ink2);
+  position:relative;
 }
-.stat-label { font-size: 0.8rem; color: var(--muted); margin-top: 0.25rem; text-transform: uppercase; letter-spacing: 0.08em; }
-
-/* ── Section titles ── */
-.section-label {
-  font-family: 'Space Mono', monospace;
-  font-size: 0.75rem; color: var(--green);
-  letter-spacing: 0.12em; text-transform: uppercase;
-  margin-bottom: 0.75rem;
+.flow-icon.active{
+  background:var(--lime3);
+  border-color:rgba(184,245,82,.3);
+  box-shadow:var(--glow-lime);
 }
-.section-title {
-  font-size: 2rem; font-weight: 700;
-  color: var(--bright); letter-spacing: -0.03em;
-  margin-bottom: 1rem;
+.flow-title{font-size:.82rem;font-weight:600;color:var(--paper)}
+.flow-sub{font-size:.72rem;color:var(--mist);line-height:1.4}
+.flow-arrow{
+  font-size:1.2rem;color:var(--line2);
+  padding:0 .25rem;align-self:center;
+  margin-bottom:1.5rem;flex-shrink:0;
 }
 
-/* ── Code block ── */
-.code-wrap {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 12px; overflow: hidden;
-  margin: 1.5rem 0;
+/* ─── TRY IT SECTION ─── */
+.section{padding:5rem 0}
+.section-tag{
+  font-family:'DM Mono',monospace;font-size:.7rem;
+  color:var(--teal);letter-spacing:.12em;text-transform:uppercase;
+  margin-bottom:.75rem;
 }
-.code-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0.75rem 1.25rem;
-  border-bottom: 1px solid var(--border);
-  background: rgba(255,255,255,0.02);
+.section-h{
+  font-family:'Instrument Serif',serif;
+  font-size:clamp(1.8rem,4vw,2.8rem);
+  color:var(--white);letter-spacing:-.02em;
+  margin-bottom:1rem;font-weight:400;line-height:1.1;
 }
-.code-dots { display: flex; gap: 6px; }
-.code-dots span { width: 10px; height: 10px; border-radius: 50%; }
-.d1{background:#ff5f57} .d2{background:#ffbd2e} .d3{background:#28c840}
-.code-lang {
-  font-family: 'Space Mono', monospace;
-  font-size: 0.7rem; color: var(--muted); letter-spacing: 0.05em;
-}
-.copy-btn {
-  font-family: 'Space Mono', monospace; font-size: 0.7rem;
-  color: var(--muted); background: none; border: 1px solid var(--border);
-  border-radius: 4px; padding: 0.2rem 0.6rem; cursor: pointer;
-  transition: color 0.2s, border-color 0.2s;
-}
-.copy-btn:hover { color: var(--green); border-color: var(--green); }
-.copy-btn.copied { color: var(--green); border-color: var(--green); }
-pre {
-  padding: 1.5rem;
-  font-family: 'Space Mono', monospace;
-  font-size: 0.82rem;
-  line-height: 1.7;
-  overflow-x: auto;
-  color: var(--text);
-}
-.c-key { color: var(--blue); }
-.c-str { color: var(--green); }
-.c-cmt { color: var(--muted); font-style: italic; }
-.c-meth { color: var(--amber); }
-.c-num { color: var(--purple); }
+.section-sub{font-size:.95rem;color:var(--mist);line-height:1.7;max-width:500px}
 
-/* ── Endpoint cards ── */
-.endpoint-grid { display: flex; flex-direction: column; gap: 1rem; margin-top: 2rem; }
-.endpoint-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 12px; overflow: hidden;
-  transition: border-color 0.2s;
+/* ─── ENCRYPT PLAYGROUND ─── */
+.playground{
+  display:grid;grid-template-columns:1fr 1fr;
+  gap:1px;background:var(--line);
+  border:1px solid var(--line);border-radius:16px;
+  overflow:hidden;margin-top:2rem;
 }
-.endpoint-card:hover { border-color: var(--muted); }
-.endpoint-header {
-  display: flex; align-items: center; gap: 1rem;
-  padding: 1rem 1.25rem; cursor: pointer;
+.pg-pane{
+  background:var(--ink2);padding:1.5rem;
+  display:flex;flex-direction:column;gap:1rem;
 }
-.method-badge {
-  font-family: 'Space Mono', monospace; font-size: 0.7rem; font-weight: 700;
-  padding: 0.25rem 0.6rem; border-radius: 4px;
-  letter-spacing: 0.05em; min-width: 48px; text-align: center;
+.pg-pane-header{
+  display:flex;align-items:center;justify-content:space-between;
 }
-.GET  { background: rgba(77,138,255,0.15); color: var(--blue); border: 1px solid rgba(77,138,255,0.3); }
-.POST { background: rgba(0,229,160,0.12); color: var(--green); border: 1px solid rgba(0,229,160,0.25); }
-.endpoint-path {
-  font-family: 'Space Mono', monospace; font-size: 0.85rem; color: var(--bright);
+.pg-pane-label{
+  font-family:'DM Mono',monospace;font-size:.7rem;
+  color:var(--mist);letter-spacing:.08em;text-transform:uppercase;
 }
-.endpoint-desc { font-size: 0.85rem; color: var(--muted); margin-left: auto; }
-.endpoint-body {
-  display: none; padding: 0 1.25rem 1.25rem;
-  border-top: 1px solid var(--border);
+.pg-badge{
+  font-family:'DM Mono',monospace;font-size:.65rem;
+  padding:.15rem .55rem;border-radius:100px;
 }
-.endpoint-body.open { display: block; }
+.pg-badge-enc{background:rgba(184,245,82,.12);color:var(--lime);border:1px solid rgba(184,245,82,.2)}
+.pg-badge-dec{background:rgba(82,229,200,.1);color:var(--teal);border:1px solid rgba(82,229,200,.2)}
+textarea{
+  width:100%;background:var(--ink3);
+  border:1px solid var(--line2);border-radius:8px;
+  color:var(--paper);font-family:'DM Mono',monospace;font-size:.78rem;
+  padding:.85rem 1rem;resize:none;outline:none;line-height:1.6;
+  transition:border-color .2s;
+  min-height:110px;
+}
+textarea:focus{border-color:var(--line)}
+textarea.out{
+  color:var(--lime);
+  background:rgba(184,245,82,.03);
+  border-color:rgba(184,245,82,.15);
+  min-height:130px;
+}
+textarea.out.teal{color:var(--teal);background:rgba(82,229,200,.03);border-color:rgba(82,229,200,.15)}
+textarea.out.err{color:var(--rose);background:rgba(255,107,138,.03);border-color:rgba(255,107,138,.15)}
+.pg-key-row{
+  display:flex;align-items:center;gap:.5rem;
+  padding:.6rem .9rem;
+  background:var(--ink3);border:1px solid var(--line2);border-radius:8px;
+  font-family:'DM Mono',monospace;font-size:.72rem;
+}
+.pg-key-dot{
+  width:7px;height:7px;border-radius:50%;background:var(--dust);flex-shrink:0;
+  transition:background .3s,box-shadow .3s;
+}
+.pg-key-dot.set{background:var(--lime);box-shadow:0 0 6px var(--lime)}
+.pg-key-text{flex:1;color:var(--mist);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pg-key-text.set{color:var(--paper)}
+.pg-key-clear{background:none;border:none;color:var(--dust);cursor:pointer;font-size:.75rem;
+  padding:0 .2rem;transition:color .15s}
+.pg-key-clear:hover{color:var(--rose)}
+.pg-action{
+  background:var(--lime);color:#000;border:none;border-radius:8px;
+  font-family:'Outfit',sans-serif;font-weight:700;font-size:.85rem;
+  padding:.75rem;cursor:pointer;
+  transition:background .2s,transform .15s,box-shadow .2s;
+}
+.pg-action:hover{background:var(--lime2);transform:translateY(-1px);box-shadow:var(--glow-lime)}
+.pg-action:disabled{opacity:.35;cursor:not-allowed;transform:none;box-shadow:none}
+.pg-action.teal-btn{
+  background:rgba(82,229,200,.15);color:var(--teal);
+  border:1px solid rgba(82,229,200,.2);
+}
+.pg-action.teal-btn:hover{background:rgba(82,229,200,.25);box-shadow:var(--glow-teal)}
 
-/* ── Tier cards ── */
-.tier-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 2rem; }
-.tier-card {
-  border-radius: 12px; padding: 2rem;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  position: relative; overflow: hidden;
+/* ─── KEY SETUP OVERLAY inside playground ─── */
+.pg-key-setup{
+  grid-column:1/-1;
+  background:var(--ink2);
+  display:flex;align-items:center;justify-content:center;
+  padding:2rem;gap:1rem;flex-wrap:wrap;
 }
-.tier-card.pro {
-  border-color: rgba(0,229,160,0.4);
-  background: linear-gradient(135deg, rgba(0,229,160,0.06), rgba(77,138,255,0.04));
+.pg-key-setup.hidden{display:none}
+.pg-setup-input{
+  flex:1;min-width:220px;max-width:340px;
+  background:var(--ink3);border:1px solid var(--line2);border-radius:8px;
+  color:var(--white);font-family:'DM Mono',monospace;font-size:.82rem;
+  padding:.7rem 1rem;outline:none;transition:border-color .2s;
 }
-.tier-card.pro::before {
-  content: 'RECOMMENDED';
-  position: absolute; top: 1rem; right: -1.5rem;
-  background: var(--green); color: #000;
-  font-family: 'Space Mono', monospace; font-size: 0.6rem; font-weight: 700;
-  padding: 0.25rem 2.5rem; transform: rotate(35deg);
-  letter-spacing: 0.1em;
+.pg-setup-input:focus{border-color:rgba(184,245,82,.4)}
+.pg-setup-btn{
+  background:var(--lime);color:#000;border:none;border-radius:8px;
+  font-family:'Outfit',sans-serif;font-weight:700;font-size:.85rem;
+  padding:.7rem 1.4rem;cursor:pointer;
+  transition:background .2s,transform .15s;white-space:nowrap;
 }
-.tier-name { font-size: 1.5rem; font-weight: 700; color: var(--bright); margin-bottom: 0.5rem; }
-.tier-price {
-  font-family: 'Space Mono', monospace;
-  font-size: 2.5rem; font-weight: 700; color: var(--green);
-  margin: 1rem 0;
+.pg-setup-btn:hover{background:var(--lime2);transform:translateY(-1px)}
+.pg-setup-hint{
+  font-size:.75rem;color:var(--mist);text-align:center;width:100%;
 }
-.tier-price small { font-size: 1rem; color: var(--muted); }
-.tier-features { list-style: none; display: flex; flex-direction: column; gap: 0.6rem; margin-top: 1.5rem; }
-.tier-features li {
-  display: flex; align-items: center; gap: 0.75rem;
-  font-size: 0.9rem; color: var(--text);
-}
-.tier-features li::before { content: '✓'; color: var(--green); font-weight: 700; }
+.pg-setup-hint a{color:var(--lime);cursor:pointer;text-decoration:none}
+.pg-setup-hint a:hover{text-decoration:underline}
 
-/* ── Try it live ── */
-.try-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 2rem; }
-.try-panel {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 12px; padding: 1.5rem;
+/* ─── CODE DOCS ─── */
+.docs-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin-top:2rem}
+.code-card{
+  background:var(--ink2);border:1px solid var(--line);
+  border-radius:12px;overflow:hidden;
 }
-.try-label { font-size: 0.75rem; color: var(--muted); font-family: 'Space Mono', monospace; margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; }
-textarea, input[type=text] {
-  width: 100%; background: var(--bg);
-  border: 1px solid var(--border); border-radius: 6px;
-  color: var(--text); font-family: 'Space Mono', monospace; font-size: 0.82rem;
-  padding: 0.75rem; resize: vertical;
-  transition: border-color 0.2s;
+.cc-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:.75rem 1.1rem;border-bottom:1px solid var(--line);
+  background:rgba(255,255,255,.02);
 }
-textarea:focus, input[type=text]:focus { outline: none; border-color: var(--green); }
-.try-btn {
-  margin-top: 1rem; width: 100%;
-  padding: 0.75rem; border-radius: 6px;
-  background: linear-gradient(135deg, var(--green), #00c8a0);
-  border: none; color: #000; font-family: 'Syne', sans-serif;
-  font-weight: 700; font-size: 0.9rem; cursor: pointer;
-  transition: transform 0.15s, opacity 0.15s;
+.cc-dots{display:flex;gap:5px}
+.cc-dots span{width:9px;height:9px;border-radius:50%}
+.d1{background:#ff5f57}.d2{background:#febc2e}.d3{background:#28c840}
+.cc-lang{font-family:'DM Mono',monospace;font-size:.68rem;color:var(--dust);letter-spacing:.06em}
+.cc-copy{
+  font-family:'DM Mono',monospace;font-size:.65rem;
+  color:var(--mist);background:none;
+  border:1px solid var(--line2);border-radius:4px;
+  padding:.15rem .55rem;cursor:pointer;transition:color .2s,border-color .2s;
 }
-.try-btn:hover { transform: translateY(-1px); opacity: 0.9; }
-.try-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-.try-output {
-  margin-top: 1rem; padding: 0.75rem;
-  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
-  font-family: 'Space Mono', monospace; font-size: 0.75rem;
-  min-height: 80px; color: var(--text); white-space: pre-wrap;
-  word-break: break-all; line-height: 1.5;
+.cc-copy:hover,.cc-copy.ok{color:var(--lime);border-color:rgba(184,245,82,.3)}
+pre{
+  padding:1.25rem;font-family:'DM Mono',monospace;
+  font-size:.76rem;line-height:1.7;overflow-x:auto;color:var(--paper);
 }
-.try-output.success { border-color: rgba(0,229,160,0.4); color: var(--green); }
-.try-output.error   { border-color: rgba(255,77,109,0.4); color: var(--red); }
+.tk{color:var(--teal)}.ts{color:var(--lime)}.tc{color:var(--dust);font-style:italic}
+.tm{color:#ff9f7f}.tn{color:#c792ea}
 
-/* ── Footer ── */
-footer {
-  margin-top: 8rem; padding: 3rem 2rem;
-  border-top: 1px solid var(--border);
-  display: flex; align-items: center; justify-content: space-between;
-  color: var(--muted); font-size: 0.85rem;
+/* ─── ENDPOINT TABLE ─── */
+.ep-table{
+  width:100%;border-collapse:collapse;margin-top:2rem;
+  font-size:.85rem;
 }
-.footer-note { font-family: 'Space Mono', monospace; font-size: 0.7rem; color: var(--border); }
+.ep-table thead th{
+  font-family:'DM Mono',monospace;font-size:.65rem;
+  color:var(--mist);letter-spacing:.1em;text-transform:uppercase;
+  padding:.6rem 1rem;text-align:left;
+  border-bottom:1px solid var(--line);
+}
+.ep-table tbody tr{
+  border-bottom:1px solid var(--line);
+  transition:background .15s;
+}
+.ep-table tbody tr:hover{background:rgba(255,255,255,.02)}
+.ep-table tbody td{padding:.85rem 1rem;vertical-align:top}
+.ep-method{
+  font-family:'DM Mono',monospace;font-size:.68rem;font-weight:700;
+  padding:.2rem .55rem;border-radius:4px;letter-spacing:.04em;
+  white-space:nowrap;display:inline-block;
+}
+.m-post{background:rgba(184,245,82,.1);color:var(--lime);border:1px solid rgba(184,245,82,.2)}
+.m-get{background:rgba(82,229,200,.1);color:var(--teal);border:1px solid rgba(82,229,200,.2)}
+.ep-path{font-family:'DM Mono',monospace;font-size:.8rem;color:var(--white)}
+.ep-desc{color:var(--mist);line-height:1.5}
+.ep-auth{
+  font-family:'DM Mono',monospace;font-size:.65rem;
+  color:var(--dust);padding:.15rem .5rem;
+  background:var(--ink3);border-radius:4px;
+  border:1px solid var(--line2);white-space:nowrap;
+}
 
-/* ── Scroll reveal ── */
-.reveal { opacity: 0; transform: translateY(24px); transition: opacity 0.6s, transform 0.6s; }
-.reveal.visible { opacity: 1; transform: none; }
+/* ─── STATS ─── */
+.stats-row{
+  display:grid;grid-template-columns:repeat(3,1fr);
+  gap:1px;background:var(--line);
+  border:1px solid var(--line);border-radius:16px;overflow:hidden;
+  margin:4rem 0;
+}
+.stat-cell{
+  background:var(--ink2);padding:2rem;text-align:center;
+}
+.stat-n{
+  font-family:'Instrument Serif',serif;
+  font-size:2.8rem;color:var(--white);line-height:1;
+  margin-bottom:.4rem;
+}
+.stat-l{font-size:.75rem;color:var(--mist);text-transform:uppercase;letter-spacing:.08em}
 
-/* ── Responsiveness ── */
-@media (max-width: 700px) {
-  .tier-grid, .try-grid { grid-template-columns: 1fr; }
-  .stats-bar { grid-template-columns: 1fr; }
-  h1 { font-size: 2.8rem; }
-  nav { padding: 1rem; }
+/* ─── FOOTER ─── */
+footer{
+  border-top:1px solid var(--line);
+  padding:2.5rem 2.5rem;
+  display:flex;align-items:center;justify-content:space-between;
+  color:var(--dust);font-size:.8rem;flex-wrap:wrap;gap:1rem;
+}
+.footer-left{display:flex;align-items:center;gap:.75rem}
+.footer-tag{font-family:'DM Mono',monospace;font-size:.65rem;color:var(--line2)}
+
+/* ─── SCROLLREVEAL ─── */
+.sr{opacity:0;transform:translateY(28px);transition:opacity .7s ease,transform .7s ease}
+.sr.in{opacity:1;transform:none}
+
+/* ─── RESPONSIVE ─── */
+@media(max-width:680px){
+  .playground{grid-template-columns:1fr}
+  .docs-grid{grid-template-columns:1fr}
+  .stats-row{grid-template-columns:1fr}
+  .flow{gap:0}
+  .flow-arrow{transform:rotate(90deg);padding:.5rem 0;margin-bottom:0}
+  .flow{flex-direction:column}
+  h1{font-size:2.8rem}
+  nav{padding:1rem 1.25rem}
 }
 </style>
 </head>
 <body>
-<div class="orb orb-1"></div>
-<div class="orb orb-2"></div>
 
+<canvas id="entropy-canvas"></canvas>
+
+<!-- NAV -->
 <nav>
-  <div class="logo">
-    <div class="logo-icon">🔑</div>
+  <a href="/" class="nav-logo">
+    <div class="logo-hex">⬡</div>
     ChaosKey
-  </div>
-  <div class="nav-pill">
-    <div class="status-dot" id="nav-status-dot"></div>
-    <span id="nav-status-text" style="font-size:0.75rem">checking...</span>
+  </a>
+  <div class="nav-status" id="nav-pill">
+    <div class="pulse-dot" id="nav-dot"></div>
+    <span id="nav-txt" style="font-size:.72rem">checking engine…</span>
   </div>
 </nav>
 
+<!-- HERO -->
 <div class="wrap">
-
-  <!-- Hero -->
   <section class="hero">
-    <div class="hero-badge">⚡ Physical Entropy · AES-256-GCM · Zero Key Exposure</div>
-    <h1>Encryption Keys<br>from <span>Physical Chaos</span></h1>
-    <p class="hero-sub">
-      Keys derived from real-world motion and audio entropy — never stored in the cloud.
-      Your data stays yours. Our key never leaves the machine.
+    <div class="hero-eyebrow">Physical Entropy · AES-256-GCM · Zero Key Exposure</div>
+    <h1>Your encryption key<br>born from <em>real chaos</em></h1>
+    <p class="hero-lead">
+      A camera watches a moving pendulum. A microphone listens to the room.<br>
+      <strong>That unpredictable motion becomes your cryptographic key</strong> — derived on a local machine, never stored in the cloud.
     </p>
-    <div class="cta-row">
-      <a href="#try" class="btn btn-primary">Try the API →</a>
-      <a href="#docs" class="btn btn-ghost">View Docs</a>
+
+    <!-- GET KEY WIDGET -->
+    <div class="get-key-widget" id="gkw">
+      <div class="gkw-header">
+        <span class="gkw-title">Get your free API key</span>
+        <span class="gkw-free-badge">Free · 100 calls/day</span>
+      </div>
+      <div class="gkw-body">
+        <div class="gkw-row">
+          <input class="gkw-input" type="email" id="gkw-email" placeholder="you@example.com" autocomplete="email">
+          <button class="gkw-btn" id="gkw-btn" onclick="getKey()">Get key →</button>
+        </div>
+        <div class="gkw-msg" id="gkw-msg">No credit card. No verification. Instant.</div>
+      </div>
     </div>
+
+    <!-- KEY RESULT -->
+    <div class="key-result" id="key-result">
+      <div class="kr-label">Your API Key is ready</div>
+      <div class="kr-key" id="kr-key-val" onclick="copyKeyResult(this)" title="Click to copy">
+        <span id="kr-key-text">ck_live_…</span>
+        <span class="kr-copy-hint">click to copy</span>
+      </div>
+      <p class="kr-note"><strong>Save this now.</strong> For your security, we don't store the key — only its hash. It cannot be recovered.</p>
+      <div class="kr-actions">
+        <button class="kr-action-btn kr-btn-primary" onclick="useKeyInPlayground()">Try it below ↓</button>
+        <button class="kr-action-btn kr-btn-ghost" onclick="copyKeyResult(document.getElementById('kr-key-val'))">Copy key</button>
+      </div>
+    </div>
+
   </section>
 
-  <!-- Stats -->
-  <div class="stats-bar reveal">
-    <div class="stat-cell">
-      <div class="stat-num" id="stat-customers">—</div>
-      <div class="stat-label">Active Customers</div>
+  <!-- HOW IT WORKS FLOW -->
+  <div class="flow sr">
+    <div class="flow-step">
+      <div class="flow-icon active">🎥</div>
+      <div class="flow-title">Physical Chaos</div>
+      <div class="flow-sub">Webcam tracks pendulum motion &amp; audio captures room noise</div>
     </div>
-    <div class="stat-cell">
-      <div class="stat-num" id="stat-today">—</div>
-      <div class="stat-label">API Calls Today</div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-icon active">🌀</div>
+      <div class="flow-title">Entropy Pool</div>
+      <div class="flow-sub">20 seconds of optical flow + audio builds an unpredictable pool</div>
     </div>
-    <div class="stat-cell">
-      <div class="stat-num">256</div>
-      <div class="stat-label">Bit Key Strength</div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-icon active">🔑</div>
+      <div class="flow-title">Key Derivation</div>
+      <div class="flow-sub">SHA-512 → Scrypt → HKDF-SHA256 produces a 256-bit key</div>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="flow-icon">🔐</div>
+      <div class="flow-title">Your API Call</div>
+      <div class="flow-sub">You send plaintext. We return AES-256-GCM ciphertext. Key never leaves our machine.</div>
     </div>
   </div>
 
-  <!-- Quickstart -->
-  <section id="docs" style="padding: 4rem 0;" class="reveal">
-    <div class="section-label">Quickstart</div>
-    <div class="section-title">Two calls. That's it.</div>
-    <p style="color:var(--muted); margin-bottom:1.5rem; line-height:1.7">
-      Authenticate with your Bearer token, send plaintext, get AES-256-GCM ciphertext back.
-      Decryption is the same key — symmetric and stateless.
-    </p>
-
-    <div class="code-wrap">
-      <div class="code-header">
-        <div class="code-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div>
-        <span class="code-lang">SHELL · Encrypt</span>
-        <button class="copy-btn" onclick="copyCode(this, 'enc-code')">copy</button>
-      </div>
-      <pre id="enc-code"><span class="c-meth">curl</span> <span class="c-key">-X POST</span> https://your-api.onrender.com/v1/encrypt \
-  <span class="c-key">-H</span> <span class="c-str">"Authorization: Bearer ck_live_YOUR_KEY"</span> \
-  <span class="c-key">-H</span> <span class="c-str">"Content-Type: application/json"</span> \
-  <span class="c-key">-d</span> <span class="c-str">'{"plaintext": "Hello, World!"}'</span>
-
-<span class="c-cmt"># Response</span>
-{
-  <span class="c-key">"ciphertext"</span>: <span class="c-str">"base64-encoded-ciphertext"</span>,
-  <span class="c-key">"nonce"</span>:      <span class="c-str">"base64-encoded-nonce"</span>,
-  <span class="c-key">"algorithm"</span>:  <span class="c-str">"AES-256-GCM"</span>
-}</pre>
+  <!-- STATS -->
+  <div class="stats-row sr">
+    <div class="stat-cell">
+      <div class="stat-n" id="s-customers">—</div>
+      <div class="stat-l">Active users</div>
     </div>
-
-    <div class="code-wrap">
-      <div class="code-header">
-        <div class="code-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div>
-        <span class="code-lang">SHELL · Decrypt</span>
-        <button class="copy-btn" onclick="copyCode(this, 'dec-code')">copy</button>
-      </div>
-      <pre id="dec-code"><span class="c-meth">curl</span> <span class="c-key">-X POST</span> https://your-api.onrender.com/v1/decrypt \
-  <span class="c-key">-H</span> <span class="c-str">"Authorization: Bearer ck_live_YOUR_KEY"</span> \
-  <span class="c-key">-H</span> <span class="c-str">"Content-Type: application/json"</span> \
-  <span class="c-key">-d</span> <span class="c-str">'{"ciphertext": "...", "nonce": "..."}'</span>
-
-<span class="c-cmt"># Response</span>
-{
-  <span class="c-key">"plaintext"</span>: <span class="c-str">"Hello, World!"</span>
-}</pre>
+    <div class="stat-cell">
+      <div class="stat-n" id="s-today">—</div>
+      <div class="stat-l">Encryptions today</div>
     </div>
-
-    <div class="code-wrap">
-      <div class="code-header">
-        <div class="code-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div>
-        <span class="code-lang">PYTHON · SDK-style</span>
-        <button class="copy-btn" onclick="copyCode(this, 'py-code')">copy</button>
-      </div>
-      <pre id="py-code"><span class="c-key">import</span> requests
-
-BASE  = <span class="c-str">"https://your-api.onrender.com"</span>
-TOKEN = <span class="c-str">"ck_live_YOUR_KEY"</span>
-HDR   = {<span class="c-str">"Authorization"</span>: <span class="c-str">f"Bearer {TOKEN}"</span>}
-
-<span class="c-cmt"># Encrypt</span>
-enc = requests.<span class="c-meth">post</span>(f<span class="c-str">"{BASE}/v1/encrypt"</span>, headers=HDR,
-      json={<span class="c-str">"plaintext"</span>: <span class="c-str">"my secret data"</span>}).json()
-print(enc[<span class="c-str">"ciphertext"</span>], enc[<span class="c-str">"nonce"</span>])
-
-<span class="c-cmt"># Decrypt</span>
-plain = requests.<span class="c-meth">post</span>(f<span class="c-str">"{BASE}/v1/decrypt"</span>, headers=HDR, json={
-    <span class="c-str">"ciphertext"</span>: enc[<span class="c-str">"ciphertext"</span>],
-    <span class="c-str">"nonce"</span>:      enc[<span class="c-str">"nonce"</span>]
-}).json()
-print(plain[<span class="c-str">"plaintext"</span>])  <span class="c-cmt"># → "my secret data"</span></pre>
+    <div class="stat-cell">
+      <div class="stat-n">256</div>
+      <div class="stat-l">Bit key strength</div>
     </div>
-  </section>
+  </div>
 
-  <!-- Endpoints reference -->
-  <section style="padding: 4rem 0;" class="reveal">
-    <div class="section-label">Reference</div>
-    <div class="section-title">All Endpoints</div>
+  <!-- PLAYGROUND -->
+  <section class="section sr">
+    <div class="section-tag">Playground</div>
+    <div class="section-h">Encrypt something right now.</div>
+    <p class="section-sub">Paste your key once — it stays for this session. Encrypt, decrypt, verify it all works.</p>
 
-    <div class="endpoint-grid">
-      <!-- POST /v1/encrypt -->
-      <div class="endpoint-card">
-        <div class="endpoint-header" onclick="toggleEndpoint(this)">
-          <span class="method-badge POST">POST</span>
-          <span class="endpoint-path">/v1/encrypt</span>
-          <span class="endpoint-desc">AES-256-GCM encrypt</span>
-        </div>
-        <div class="endpoint-body">
-          <p style="color:var(--muted);font-size:0.85rem;margin-bottom:1rem;">Encrypt a plaintext string using the chaos-derived AES-256-GCM key. Requires Bearer auth.</p>
-          <div class="code-wrap"><div class="code-header"><div class="code-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div><span class="code-lang">REQUEST BODY</span></div>
-          <pre>{ <span class="c-key">"plaintext"</span>: <span class="c-str">"string"</span> }</pre></div>
-          <div class="code-wrap"><div class="code-header"><div class="code-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div><span class="code-lang">RESPONSE 200</span></div>
-          <pre>{ <span class="c-key">"ciphertext"</span>: <span class="c-str">"base64"</span>, <span class="c-key">"nonce"</span>: <span class="c-str">"base64"</span>, <span class="c-key">"algorithm"</span>: <span class="c-str">"AES-256-GCM"</span> }</pre></div>
-        </div>
-      </div>
+    <div class="playground" id="playground">
 
-      <!-- POST /v1/decrypt -->
-      <div class="endpoint-card">
-        <div class="endpoint-header" onclick="toggleEndpoint(this)">
-          <span class="method-badge POST">POST</span>
-          <span class="endpoint-path">/v1/decrypt</span>
-          <span class="endpoint-desc">AES-256-GCM decrypt</span>
-        </div>
-        <div class="endpoint-body">
-          <p style="color:var(--muted);font-size:0.85rem;margin-bottom:1rem;">Decrypt a ciphertext using the stored nonce. Both fields required.</p>
-          <div class="code-wrap"><div class="code-header"><div class="code-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div><span class="code-lang">REQUEST BODY</span></div>
-          <pre>{ <span class="c-key">"ciphertext"</span>: <span class="c-str">"base64"</span>, <span class="c-key">"nonce"</span>: <span class="c-str">"base64"</span> }</pre></div>
-          <div class="code-wrap"><div class="code-header"><div class="code-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div><span class="code-lang">RESPONSE 200</span></div>
-          <pre>{ <span class="c-key">"plaintext"</span>: <span class="c-str">"string"</span> }</pre></div>
-        </div>
-      </div>
-
-      <!-- GET /v1/usage -->
-      <div class="endpoint-card">
-        <div class="endpoint-header" onclick="toggleEndpoint(this)">
-          <span class="method-badge GET">GET</span>
-          <span class="endpoint-path">/v1/usage</span>
-          <span class="endpoint-desc">Quota & call history</span>
-        </div>
-        <div class="endpoint-body">
-          <p style="color:var(--muted);font-size:0.85rem;margin-bottom:1rem;">Returns current usage, tier limits, and last 20 API calls for your key.</p>
-          <div class="code-wrap"><div class="code-header"><div class="code-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div><span class="code-lang">RESPONSE 200</span></div>
-          <pre>{ <span class="c-key">"tier"</span>: <span class="c-str">"free"</span>, <span class="c-key">"quota_today"</span>: <span class="c-num">100</span>, <span class="c-key">"used_today"</span>: <span class="c-num">12</span>,
-  <span class="c-key">"remaining_today"</span>: <span class="c-num">88</span>, <span class="c-key">"recent_calls"</span>: [ ... ] }</pre></div>
-        </div>
-      </div>
-
-      <!-- GET /v1/status -->
-      <div class="endpoint-card">
-        <div class="endpoint-header" onclick="toggleEndpoint(this)">
-          <span class="method-badge GET">GET</span>
-          <span class="endpoint-path">/v1/status</span>
-          <span class="endpoint-desc">Engine health check</span>
-        </div>
-        <div class="endpoint-body">
-          <p style="color:var(--muted);font-size:0.85rem;margin-bottom:1rem;">Check whether the local encryption engine is online and the chaos key is ready.</p>
-          <div class="code-wrap"><div class="code-header"><div class="code-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div><span class="code-lang">RESPONSE 200</span></div>
-          <pre>{ <span class="c-key">"status"</span>: <span class="c-str">"ok"</span>, <span class="c-key">"bridge"</span>: <span class="c-str">"online"</span> }</pre></div>
-        </div>
-      </div>
-
-      <!-- POST /v1/keys -->
-      <div class="endpoint-card">
-        <div class="endpoint-header" onclick="toggleEndpoint(this)">
-          <span class="method-badge POST">POST</span>
-          <span class="endpoint-path">/v1/keys</span>
-          <span class="endpoint-desc">Issue additional API key</span>
-        </div>
-        <div class="endpoint-body">
-          <p style="color:var(--muted);font-size:0.85rem;margin-bottom:1rem;">Issue a second API key under your account (e.g. for different environments). Authenticate with an existing valid key.</p>
-          <div class="code-wrap"><div class="code-header"><div class="code-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div><span class="code-lang">REQUEST BODY</span></div>
-          <pre>{ <span class="c-key">"label"</span>: <span class="c-str">"production"</span> }</pre></div>
-          <div class="code-wrap"><div class="code-header"><div class="code-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div><span class="code-lang">RESPONSE 201</span></div>
-          <pre>{ <span class="c-key">"api_key"</span>: <span class="c-str">"ck_live_..."</span>, <span class="c-key">"label"</span>: <span class="c-str">"production"</span> }</pre></div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- Pricing -->
-  <section style="padding: 4rem 0;" class="reveal">
-    <div class="section-label">Pricing</div>
-    <div class="section-title">Simple, honest tiers.</div>
-    <div class="tier-grid">
-      <div class="tier-card">
-        <div class="tier-name">Free</div>
-        <div class="tier-price">$0 <small>/ month</small></div>
-        <ul class="tier-features">
-          <li>100 API calls / day</li>
-          <li>AES-256-GCM encryption</li>
-          <li>JSON REST API</li>
-          <li>Usage analytics</li>
-        </ul>
-      </div>
-      <div class="tier-card pro">
-        <div class="tier-name">Pro</div>
-        <div class="tier-price">$29 <small>/ month</small></div>
-        <ul class="tier-features">
-          <li>10,000 API calls / day</li>
-          <li>AES-256-GCM encryption</li>
-          <li>Priority routing</li>
-          <li>Multiple API keys</li>
-          <li>Full call history</li>
-        </ul>
-      </div>
-    </div>
-  </section>
-
-  <!-- Try it live -->
-  <section id="try" style="padding: 4rem 0;" class="reveal">
-    <div class="section-label">Interactive</div>
-    <div class="section-title">Try it live.</div>
-    <p style="color:var(--muted); margin-bottom:1.5rem; font-size:0.9rem;">
-      Test encrypt &amp; decrypt right here. Enter your key once — it stays for the session.
-    </p>
-
-    <div id="key-entry-row" style="margin-bottom:1.25rem;">
-      <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;">
-        <input type="text" id="live-key-input" placeholder="Paste your API key (ck_live_…)"
+      <!-- Key setup row (shown when no key set) -->
+      <div class="pg-key-setup" id="pg-key-setup">
+        <input class="pg-setup-input" type="text" id="pg-key-input"
+               placeholder="Paste your API key (ck_live_…)"
                autocomplete="off" spellcheck="false"
-               style="flex:1;min-width:240px;font-family:Space Mono,monospace;font-size:0.82rem;"
-               onkeydown="if(event.key==='Enter')saveKey()">
-        <button class="btn btn-primary" style="padding:0.6rem 1.25rem;font-size:0.85rem;white-space:nowrap;"
-                onclick="saveKey()">Use this key &#8594;</button>
+               onkeydown="if(event.key==='Enter')activateKey()">
+        <button class="pg-setup-btn" onclick="activateKey()">Activate →</button>
+        <p class="pg-setup-hint">
+          No key? <a onclick="scrollToTop()">Get one free above ↑</a>
+        </p>
       </div>
-      <p style="font-size:0.75rem;color:var(--muted);margin-top:0.5rem;">
-        No key yet? Ask an admin or use the <span style="color:var(--green);font-family:monospace">/admin/register</span> endpoint.
-      </p>
-    </div>
 
-    <div id="key-active-row" style="display:none;margin-bottom:1.25rem;">
-      <div style="display:inline-flex;align-items:center;gap:0.75rem;padding:0.6rem 1rem;
-                  background:rgba(0,229,160,0.07);border:1px solid rgba(0,229,160,0.25);border-radius:8px;">
-        <div style="width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green);flex-shrink:0;"></div>
-        <span style="font-family:Space Mono,monospace;font-size:0.78rem;color:var(--green);" id="key-active-label">ck_live_…</span>
-        <button onclick="clearKey()"
-                style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:0.75rem;padding:0 0.25rem;">
-          &#x2715; change
-        </button>
+      <!-- Encrypt pane (hidden until key set) -->
+      <div class="pg-pane" id="pane-enc" style="display:none">
+        <div class="pg-pane-header">
+          <span class="pg-pane-label">Plaintext</span>
+          <span class="pg-badge pg-badge-enc">ENCRYPT</span>
+        </div>
+        <div class="pg-key-row">
+          <div class="pg-key-dot set" id="enc-dot"></div>
+          <span class="pg-key-text set" id="enc-key-label">ck_live_…</span>
+          <button class="pg-key-clear" onclick="clearKey()" title="Change key">✕</button>
+        </div>
+        <textarea id="enc-input" rows="4" placeholder="Type anything to encrypt…">Hello from ChaosKey!</textarea>
+        <button class="pg-action" onclick="doEncrypt()">Encrypt with AES-256-GCM →</button>
+        <textarea class="out" id="enc-output" rows="5" readonly placeholder="Encrypted output will appear here…"></textarea>
       </div>
-    </div>
 
-    <div class="try-grid">
-      <div class="try-panel">
-        <div class="try-label">Encrypt</div>
-        <textarea id="enc-plain" rows="4" placeholder="Enter text to encrypt…">Hello, ChaosKey!</textarea>
-        <button class="try-btn" onclick="liveEncrypt()">Encrypt &#8594;</button>
-        <div class="try-output" id="enc-out">Enter your API key above, then click Encrypt.</div>
+      <!-- Decrypt pane (hidden until key set) -->
+      <div class="pg-pane" id="pane-dec" style="display:none">
+        <div class="pg-pane-header">
+          <span class="pg-pane-label">Ciphertext</span>
+          <span class="pg-badge pg-badge-dec">DECRYPT</span>
+        </div>
+        <p style="font-size:.75rem;color:var(--mist);line-height:1.5">After encrypting, the JSON result auto-fills here. Or paste any ciphertext + nonce to decrypt.</p>
+        <textarea id="dec-input" rows="5" placeholder='{"ciphertext":"…","nonce":"…"}'></textarea>
+        <button class="pg-action teal-btn" onclick="doDecrypt()">Decrypt →</button>
+        <textarea class="out teal" id="dec-output" rows="4" readonly placeholder="Decrypted plaintext will appear here…"></textarea>
       </div>
-      <div class="try-panel">
-        <div class="try-label">Decrypt</div>
-        <textarea id="dec-cipher" rows="4" placeholder="Encrypt something — the result auto-fills here."></textarea>
-        <button class="try-btn" onclick="liveDecrypt()">Decrypt &#8594;</button>
-        <div class="try-output" id="dec-out">Decrypted text will appear here.</div>
+
+    </div>
+  </section>
+
+  <!-- CODE EXAMPLES -->
+  <section class="section sr">
+    <div class="section-tag">Integration</div>
+    <div class="section-h">Copy. Paste. Done.</div>
+    <p class="section-sub">Two endpoints. Bearer auth. Works with any HTTP client.</p>
+
+    <div class="docs-grid">
+      <div class="code-card">
+        <div class="cc-header">
+          <div class="cc-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div>
+          <span class="cc-lang">PYTHON</span>
+          <button class="cc-copy" onclick="cpCode(this,'c1')">copy</button>
+        </div>
+        <pre id="c1"><span class="tc"># pip install requests</span>
+<span class="tk">import</span> requests
+
+BASE = <span class="ts">"https://your-app.onrender.com"</span>
+KEY  = <span class="ts">"ck_live_YOUR_KEY"</span>
+H    = {<span class="ts">"Authorization"</span>: <span class="ts">f"Bearer {KEY}"</span>}
+
+<span class="tc"># Encrypt</span>
+r = requests.<span class="tm">post</span>(f<span class="ts">"{BASE}/v1/encrypt"</span>, headers=H,
+        json={<span class="ts">"plaintext"</span>: <span class="ts">"secret data"</span>})
+enc = r.json()
+<span class="tc"># {"ciphertext": "…", "nonce": "…"}</span>
+
+<span class="tc"># Decrypt</span>
+r = requests.<span class="tm">post</span>(f<span class="ts">"{BASE}/v1/decrypt"</span>, headers=H,
+        json=enc)
+print(r.json()[<span class="ts">"plaintext"</span>])  <span class="tc"># → "secret data"</span></pre>
+      </div>
+
+      <div class="code-card">
+        <div class="cc-header">
+          <div class="cc-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div>
+          <span class="cc-lang">JAVASCRIPT</span>
+          <button class="cc-copy" onclick="cpCode(this,'c2')">copy</button>
+        </div>
+        <pre id="c2"><span class="tk">const</span> BASE = <span class="ts">"https://your-app.onrender.com"</span>;
+<span class="tk">const</span> KEY  = <span class="ts">"ck_live_YOUR_KEY"</span>;
+<span class="tk">const</span> H    = {
+  <span class="ts">"Authorization"</span>: <span class="ts">`Bearer ${KEY}`</span>,
+  <span class="ts">"Content-Type"</span>: <span class="ts">"application/json"</span>
+};
+
+<span class="tc">// Encrypt</span>
+<span class="tk">const</span> enc = <span class="tk">await</span> <span class="tm">fetch</span>(<span class="ts">`${BASE}/v1/encrypt`</span>, {
+  method: <span class="ts">"POST"</span>, headers: H,
+  body: JSON.<span class="tm">stringify</span>({ plaintext: <span class="ts">"secret"</span> })
+}).<span class="tm">then</span>(r => r.<span class="tm">json</span>());
+
+<span class="tc">// Decrypt</span>
+<span class="tk">const</span> out = <span class="tk">await</span> <span class="tm">fetch</span>(<span class="ts">`${BASE}/v1/decrypt`</span>, {
+  method: <span class="ts">"POST"</span>, headers: H,
+  body: JSON.<span class="tm">stringify</span>(enc)
+}).<span class="tm">then</span>(r => r.<span class="tm">json</span>());
+console.<span class="tm">log</span>(out.plaintext); <span class="tc">// → "secret"</span></pre>
+      </div>
+
+      <div class="code-card">
+        <div class="cc-header">
+          <div class="cc-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div>
+          <span class="cc-lang">CURL</span>
+          <button class="cc-copy" onclick="cpCode(this,'c3')">copy</button>
+        </div>
+        <pre id="c3"><span class="tc"># Encrypt</span>
+<span class="tm">curl</span> <span class="tk">-X POST</span> https://your-app.onrender.com/v1/encrypt \
+  <span class="tk">-H</span> <span class="ts">"Authorization: Bearer ck_live_YOUR_KEY"</span> \
+  <span class="tk">-H</span> <span class="ts">"Content-Type: application/json"</span> \
+  <span class="tk">-d</span> <span class="ts">'{"plaintext":"hello world"}'</span>
+
+<span class="tc"># Decrypt</span>
+<span class="tm">curl</span> <span class="tk">-X POST</span> https://your-app.onrender.com/v1/decrypt \
+  <span class="tk">-H</span> <span class="ts">"Authorization: Bearer ck_live_YOUR_KEY"</span> \
+  <span class="tk">-H</span> <span class="ts">"Content-Type: application/json"</span> \
+  <span class="tk">-d</span> <span class="ts">'{"ciphertext":"…","nonce":"…"}'</span></pre>
+      </div>
+
+      <div class="code-card">
+        <div class="cc-header">
+          <div class="cc-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div>
+          <span class="cc-lang">API REFERENCE</span>
+          <button class="cc-copy" onclick="cpCode(this,'c4')">copy</button>
+        </div>
+        <pre id="c4"><span class="tc"># Register (get a free key)</span>
+<span class="tm">POST</span> /v1/register
+  body: { <span class="ts">"email"</span>: <span class="ts">"you@example.com"</span> }
+  → { <span class="ts">"api_key"</span>: <span class="ts">"ck_live_…"</span> }
+
+<span class="tc"># Encrypt plaintext</span>
+<span class="tm">POST</span> /v1/encrypt  <span class="tn">[Bearer token]</span>
+  body: { <span class="ts">"plaintext"</span>: <span class="ts">"…"</span> }
+  → { <span class="ts">"ciphertext"</span>: <span class="ts">"…"</span>, <span class="ts">"nonce"</span>: <span class="ts">"…"</span> }
+
+<span class="tc"># Decrypt ciphertext</span>
+<span class="tm">POST</span> /v1/decrypt  <span class="tn">[Bearer token]</span>
+  body: { <span class="ts">"ciphertext"</span>: <span class="ts">"…"</span>, <span class="ts">"nonce"</span>: <span class="ts">"…"</span> }
+  → { <span class="ts">"plaintext"</span>: <span class="ts">"…"</span> }
+
+<span class="tc"># Check your usage</span>
+<span class="tm">GET</span>  /v1/usage    <span class="tn">[Bearer token]</span>
+  → { <span class="ts">"used_today"</span>: <span class="tn">12</span>, <span class="ts">"quota_today"</span>: <span class="tn">100</span> }</pre>
       </div>
     </div>
   </section>
@@ -879,169 +997,294 @@ print(plain[<span class="c-str">"plaintext"</span>])  <span class="c-cmt"># → 
 </div><!-- /wrap -->
 
 <footer>
-  <div class="logo" style="font-size:0.9rem;">
-    <div class="logo-icon" style="width:24px;height:24px;font-size:12px;">🔑</div>
-    ChaosKey API
+  <div class="footer-left">
+    <div class="logo-hex" style="width:24px;height:24px;font-size:11px">⬡</div>
+    <span style="font-family:'DM Mono',monospace;font-size:.75rem;color:var(--dust)">ChaosKey</span>
   </div>
-  <div class="footer-note">Physical entropy. Zero cloud key storage.</div>
+  <div class="footer-tag">Physical entropy. Key never leaves our machine.</div>
 </footer>
 
 <script>
-// ── Status poll ────────────────────────────────────────────────────────────────
-async function pollStatus() {
-  try {
-    const r = await fetch('/health');
-    const d = await r.json();
-    const dot  = document.getElementById('nav-status-dot');
-    const text = document.getElementById('nav-status-text');
-    if (d.tunnel_active) {
-      dot.classList.add('live');
-      text.textContent = 'Engine Online';
+// ════════════════════════════════════════════════════════════
+//  ENTROPY CANVAS — flowing particle field (visual metaphor)
+// ════════════════════════════════════════════════════════════
+(function(){
+  const cv = document.getElementById('entropy-canvas');
+  const cx = cv.getContext('2d');
+  let W,H,particles=[];
+  const N=90, SPEED=.4;
+
+  function resize(){
+    W=cv.width=innerWidth; H=cv.height=innerHeight;
+  }
+  resize(); addEventListener('resize',resize);
+
+  class Particle{
+    constructor(){this.reset(true)}
+    reset(init){
+      this.x = Math.random()*W;
+      this.y = init ? Math.random()*H : (Math.random()<.5?-4:H+4);
+      this.vx = (Math.random()-.5)*SPEED;
+      this.vy = (Math.random()*.6+.2)*SPEED*(this.y<0?1:-1);
+      this.r  = Math.random()*1.5+.4;
+      this.life=0; this.maxLife=300+Math.random()*400;
+      this.hue = Math.random()<.6?150:175; // lime vs teal
+    }
+    step(){
+      // Curl noise-ish motion
+      const t=Date.now()*.0003;
+      const nx=this.x/W*4+t, ny=this.y/H*4+t*.7;
+      const angle=(Math.sin(nx)*Math.cos(ny))*Math.PI*2;
+      this.vx+=Math.cos(angle)*.008;
+      this.vy+=Math.sin(angle)*.008;
+      // Damping
+      this.vx*=.98; this.vy*=.98;
+      this.x+=this.vx; this.y+=this.vy;
+      this.life++;
+      if(this.life>this.maxLife||this.x<-10||this.x>W+10||this.y<-10||this.y>H+10)
+        this.reset(false);
+    }
+    draw(){
+      const alpha=Math.min(this.life/60,1)*Math.min((this.maxLife-this.life)/60,1)*.6;
+      cx.beginPath();
+      cx.arc(this.x,this.y,this.r,0,Math.PI*2);
+      cx.fillStyle=`hsla(${this.hue},90%,65%,${alpha})`;
+      cx.fill();
+    }
+  }
+
+  for(let i=0;i<N;i++) particles.push(new Particle());
+
+  function draw(){
+    cx.clearRect(0,0,W,H);
+    // Draw connection lines
+    for(let i=0;i<particles.length;i++){
+      for(let j=i+1;j<particles.length;j++){
+        const dx=particles[i].x-particles[j].x;
+        const dy=particles[i].y-particles[j].y;
+        const d=Math.sqrt(dx*dx+dy*dy);
+        if(d<120){
+          const a=(1-d/120)*.07;
+          cx.beginPath();
+          cx.moveTo(particles[i].x,particles[i].y);
+          cx.lineTo(particles[j].x,particles[j].y);
+          cx.strokeStyle=`rgba(184,245,82,${a})`;
+          cx.lineWidth=.5;
+          cx.stroke();
+        }
+      }
+    }
+    particles.forEach(p=>{p.step();p.draw()});
+    requestAnimationFrame(draw);
+  }
+  draw();
+})();
+
+// ════════════════════════════════════════════════════════════
+//  STATE
+// ════════════════════════════════════════════════════════════
+let _key = sessionStorage.getItem('ck_key') || '';
+let _newKey = '';   // freshly issued key, held for playground
+
+// ════════════════════════════════════════════════════════════
+//  NAV STATUS
+// ════════════════════════════════════════════════════════════
+async function pollStatus(){
+  try{
+    const d=await(await fetch('/health')).json();
+    const dot=document.getElementById('nav-dot');
+    const txt=document.getElementById('nav-txt');
+    const pill=document.getElementById('nav-pill');
+    if(d.tunnel_active){
+      dot.classList.add('live'); pill.classList.add('live');
+      txt.textContent='Engine online';
     } else {
-      dot.classList.remove('live');
-      text.textContent = 'Engine Offline';
+      dot.classList.remove('live'); pill.classList.remove('live');
+      txt.textContent='Engine offline';
     }
-  } catch(e) {}
-  try {
-    const r = await fetch('/admin/stats', { headers: { 'X-Admin-Secret': '' } });
-    if (r.ok) {
-      const d = await r.json();
-      document.getElementById('stat-customers').textContent = d.total_customers;
-      document.getElementById('stat-today').textContent     = d.today_requests;
+    // Load public stats (best-effort, no auth needed)
+    try{
+      const s=await(await fetch('/public/stats')).json();
+      document.getElementById('s-customers').textContent=s.total_customers??'—';
+      document.getElementById('s-today').textContent=s.today_requests??'—';
+    }catch(e){}
+  }catch(e){}
+}
+pollStatus(); setInterval(pollStatus,6000);
+
+// ════════════════════════════════════════════════════════════
+//  GET KEY FLOW
+// ════════════════════════════════════════════════════════════
+async function getKey(){
+  const emailEl=document.getElementById('gkw-email');
+  const btn=document.getElementById('gkw-btn');
+  const msg=document.getElementById('gkw-msg');
+  const email=emailEl.value.trim();
+
+  if(!email||!email.includes('@')){
+    msg.textContent='Enter a valid email address.'; msg.className='gkw-msg err'; return;
+  }
+  btn.disabled=true; msg.textContent='Generating your key…'; msg.className='gkw-msg';
+
+  try{
+    const {ok,data}=await apiFetch('/v1/register',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({email})
+    });
+    if(ok){
+      _newKey=data.api_key;
+      // Show result card
+      document.getElementById('kr-key-text').textContent=data.api_key;
+      document.getElementById('key-result').classList.add('show');
+      document.getElementById('gkw').style.display='none';
+      msg.textContent=''; 
+    } else {
+      msg.textContent='✗ '+(data.error||'Registration failed'); msg.className='gkw-msg err';
+      btn.disabled=false;
     }
-  } catch(e) {}
+  }catch(e){
+    msg.textContent='✗ Network error — try again'; msg.className='gkw-msg err';
+    btn.disabled=false;
+  }
 }
-pollStatus(); setInterval(pollStatus, 5000);
+document.getElementById('gkw-email').addEventListener('keydown',e=>{if(e.key==='Enter')getKey()});
 
-// ── Endpoint accordion ─────────────────────────────────────────────────────────
-function toggleEndpoint(header) {
-  const body = header.nextElementSibling;
-  body.classList.toggle('open');
-}
-
-// ── Copy code ──────────────────────────────────────────────────────────────────
-function copyCode(btn, id) {
-  const el = document.getElementById(id);
-  navigator.clipboard.writeText(el.innerText).then(() => {
-    btn.textContent = 'copied!'; btn.classList.add('copied');
-    setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 2000);
+function copyKeyResult(el){
+  const txt=document.getElementById('kr-key-text').textContent;
+  navigator.clipboard.writeText(txt).then(()=>{
+    const hint=el.querySelector('.kr-copy-hint');
+    if(hint){hint.textContent='copied!';setTimeout(()=>hint.textContent='click to copy',2000)}
   });
 }
 
-// ── API key persistence (session only — never written to disk) ─────────────────
-let _apiKey = sessionStorage.getItem('ck_api_key') || '';
-
-function saveKey() {
-  const val = document.getElementById('live-key-input').value.trim();
-  if (!val) return;
-  _apiKey = val;
-  sessionStorage.setItem('ck_api_key', val);
-  renderKeyState();
+function useKeyInPlayground(){
+  const k=_newKey||document.getElementById('kr-key-text').textContent;
+  sessionStorage.setItem('ck_key',k);
+  _key=k;
+  activateKeyValue(k);
+  document.getElementById('playground').scrollIntoView({behavior:'smooth',block:'start'});
 }
 
-function clearKey() {
-  _apiKey = '';
-  sessionStorage.removeItem('ck_api_key');
-  renderKeyState();
+function scrollToTop(){
+  document.getElementById('gkw').scrollIntoView({behavior:'smooth',block:'center'});
 }
 
-function renderKeyState() {
-  const entryRow  = document.getElementById('key-entry-row');
-  const activeRow = document.getElementById('key-active-row');
-  const label     = document.getElementById('key-active-label');
-  if (_apiKey) {
-    entryRow.style.display  = 'none';
-    activeRow.style.display = 'block';
-    // Show first 16 chars + ellipsis so the key isn't fully exposed
-    label.textContent = _apiKey.length > 20 ? _apiKey.slice(0, 20) + '…' : _apiKey;
+// ════════════════════════════════════════════════════════════
+//  PLAYGROUND KEY MANAGEMENT
+// ════════════════════════════════════════════════════════════
+function activateKey(){
+  const v=document.getElementById('pg-key-input').value.trim();
+  if(!v){return}
+  sessionStorage.setItem('ck_key',v); _key=v;
+  activateKeyValue(v);
+}
+
+function activateKeyValue(k){
+  document.getElementById('pg-key-setup').classList.add('hidden');
+  document.getElementById('pane-enc').style.display='flex';
+  document.getElementById('pane-enc').style.flexDirection='column';
+  document.getElementById('pane-dec').style.display='flex';
+  document.getElementById('pane-dec').style.flexDirection='column';
+  const label=k.length>22?k.slice(0,22)+'…':k;
+  document.getElementById('enc-key-label').textContent=label;
+}
+
+function clearKey(){
+  sessionStorage.removeItem('ck_key'); _key='';
+  document.getElementById('pg-key-setup').classList.remove('hidden');
+  document.getElementById('pane-enc').style.display='none';
+  document.getElementById('pane-dec').style.display='none';
+  document.getElementById('pg-key-input').value='';
+  document.getElementById('enc-output').value='';
+  document.getElementById('dec-output').value='';
+  document.getElementById('dec-input').value='';
+}
+
+// Restore session key on load
+if(_key) activateKeyValue(_key);
+
+// ════════════════════════════════════════════════════════════
+//  ENCRYPT / DECRYPT
+// ════════════════════════════════════════════════════════════
+async function doEncrypt(){
+  const plain=document.getElementById('enc-input').value.trim();
+  const out=document.getElementById('enc-output');
+  if(!plain){out.value='⚠ Enter some text first.';out.className='out err';return}
+  out.value='Encrypting…'; out.className='out';
+  const {ok,data}=await apiFetch('/v1/encrypt',{
+    method:'POST',
+    headers:{'Authorization':'Bearer '+_key,'Content-Type':'application/json'},
+    body:JSON.stringify({plaintext:plain})
+  });
+  if(ok){
+    out.value=JSON.stringify(data,null,2); out.className='out';
+    document.getElementById('dec-input').value=JSON.stringify(data,null,2);
   } else {
-    entryRow.style.display  = 'block';
-    activeRow.style.display = 'none';
-    document.getElementById('live-key-input').value = '';
+    out.value='✗ '+(data.error||JSON.stringify(data)); out.className='out err';
   }
 }
 
-// Restore on page load
-renderKeyState();
-
-// ── Live API tester ────────────────────────────────────────────────────────────
-
-// Safe fetch — never blindly calls .json(); handles HTML error pages gracefully
-async function apiFetch(path, options) {
-  const r  = await fetch(path, options);
-  const ct = r.headers.get('Content-Type') || '';
-  let data;
-  if (ct.includes('application/json')) {
-    data = await r.json();
-  } else {
-    const txt   = await r.text();
-    const match = txt.match(/<title>([^<]*)<\/title>/i);
-    data = { error: match ? match[1] : 'HTTP ' + r.status + ' — server returned a non-JSON response' };
-  }
-  return { ok: r.ok, status: r.status, data };
-}
-
-async function liveEncrypt() {
-  const out   = document.getElementById('enc-out');
-  const plain = document.getElementById('enc-plain').value.trim();
-  if (!_apiKey) { out.textContent = '⚠ Enter your API key above first.'; out.className = 'try-output error'; return; }
-  if (!plain)   { out.textContent = '⚠ Enter some text to encrypt.';     out.className = 'try-output error'; return; }
-  out.className = 'try-output'; out.textContent = 'Encrypting…';
-  try {
-    const { ok, data } = await apiFetch('/v1/encrypt', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + _apiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plaintext: plain })
-    });
-    if (ok) {
-      document.getElementById('dec-cipher').value = JSON.stringify(data, null, 2);
-      out.className = 'try-output success';
-      out.textContent = JSON.stringify(data, null, 2);
-    } else {
-      out.className = 'try-output error';
-      out.textContent = '✗ ' + (data.error || JSON.stringify(data, null, 2));
-    }
-  } catch(e) { out.className = 'try-output error'; out.textContent = '✗ Network error: ' + String(e); }
-}
-
-async function liveDecrypt() {
-  const out = document.getElementById('dec-out');
-  const raw = document.getElementById('dec-cipher').value.trim();
-  if (!_apiKey) { out.textContent = '⚠ Enter your API key above first.'; out.className = 'try-output error'; return; }
-  if (!raw)     { out.textContent = '⚠ Encrypt something first, or paste JSON with ciphertext + nonce.'; out.className = 'try-output error'; return; }
+async function doDecrypt(){
+  const raw=document.getElementById('dec-input').value.trim();
+  const out=document.getElementById('dec-output');
+  if(!raw){out.value='⚠ Paste ciphertext JSON or encrypt something first.';out.className='out err';return}
   let body;
-  try { body = JSON.parse(raw); }
-  catch(e) { out.className = 'try-output error'; out.textContent = '✗ Invalid JSON — paste the full encrypt response here.'; return; }
-  if (!body.ciphertext || !body.nonce) {
-    out.className = 'try-output error';
-    out.textContent = '✗ JSON must contain both "ciphertext" and "nonce" fields.';
-    return;
+  try{body=JSON.parse(raw)}
+  catch(e){out.value='✗ Invalid JSON — paste the full encrypt response.';out.className='out err';return}
+  if(!body.ciphertext||!body.nonce){out.value='✗ JSON needs both "ciphertext" and "nonce".';out.className='out err';return}
+  out.value='Decrypting…'; out.className='out teal';
+  const {ok,data}=await apiFetch('/v1/decrypt',{
+    method:'POST',
+    headers:{'Authorization':'Bearer '+_key,'Content-Type':'application/json'},
+    body:JSON.stringify({ciphertext:body.ciphertext,nonce:body.nonce})
+  });
+  if(ok){
+    out.value=data.plaintext??JSON.stringify(data); out.className='out teal';
+  } else {
+    out.value='✗ '+(data.error||JSON.stringify(data)); out.className='out err';
   }
-  out.className = 'try-output'; out.textContent = 'Decrypting…';
-  try {
-    const { ok, data } = await apiFetch('/v1/decrypt', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + _apiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ciphertext: body.ciphertext, nonce: body.nonce })
-    });
-    if (ok) {
-      out.className = 'try-output success';
-      out.textContent = data.plaintext ?? JSON.stringify(data, null, 2);
-    } else {
-      out.className = 'try-output error';
-      out.textContent = '✗ ' + (data.error || JSON.stringify(data, null, 2));
-    }
-  } catch(e) { out.className = 'try-output error'; out.textContent = '✗ Network error: ' + String(e); }
 }
 
-// ── Scroll reveal ──────────────────────────────────────────────────────────────
-const obs = new IntersectionObserver((entries) => {
-  entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('visible'); obs.unobserve(e.target); } });
-}, { threshold: 0.08 });
-document.querySelectorAll('.reveal').forEach(el => obs.observe(el));
+// ════════════════════════════════════════════════════════════
+//  HELPERS
+// ════════════════════════════════════════════════════════════
+async function apiFetch(path,opts){
+  const r=await fetch(path,opts);
+  const ct=r.headers.get('Content-Type')||'';
+  let data;
+  if(ct.includes('application/json')){data=await r.json()}
+  else{
+    const t=await r.text();
+    const m=t.match(/<title>([^<]*)<\/title>/i);
+    data={error:m?m[1]:'HTTP '+r.status+' (non-JSON response)'};
+  }
+  return{ok:r.ok,status:r.status,data};
+}
+
+function cpCode(btn,id){
+  navigator.clipboard.writeText(document.getElementById(id).innerText).then(()=>{
+    btn.textContent='copied!'; btn.classList.add('ok');
+    setTimeout(()=>{btn.textContent='copy';btn.classList.remove('ok')},2000);
+  });
+}
+
+// Scroll reveal
+const sro=new IntersectionObserver(es=>{
+  es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');sro.unobserve(e.target)}});
+},{threshold:.07});
+document.querySelectorAll('.sr').forEach(el=>sro.observe(el));
 </script>
 </body>
 </html>"""
+
+@app.route("/public/stats")
+def public_stats():
+    """Unauthenticated lightweight stats for the landing page counter."""
+    db = get_db()
+    total_customers = db.execute("SELECT COUNT(*) FROM customers WHERE active=1").fetchone()[0]
+    today_requests  = db.execute("SELECT SUM(count) FROM daily_counts WHERE day=?", (today(),)).fetchone()[0] or 0
+    return jsonify({"total_customers": total_customers, "today_requests": today_requests})
 
 @app.route("/")
 def index():
