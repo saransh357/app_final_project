@@ -239,6 +239,13 @@ def api_status():
     _, data, status = relay_request("/relay/status")
     return jsonify(data), status
 
+@app.route("/v1/export_key", methods=["GET"])
+@require_api_key
+def export_key():
+    """DANGER: This exposes the master physical entropy key to the client."""
+    _, data, status = relay_request("/relay/export_key", "GET")
+    log_usage("/v1/export_key", status)
+    return jsonify(data), status
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.route("/health")
