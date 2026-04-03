@@ -657,6 +657,12 @@ document.querySelectorAll('.sr').forEach(el=>sro.observe(el));
 </body>
 </html>"""
 
+@app.route("/")
+def index():
+    return render_template_string(DASHBOARD_HTML)
+
+# MUST BE OUTSIDE THE MAIN BLOCK SO RENDER RUNS IT!
 init_db()
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=False)
