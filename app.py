@@ -94,9 +94,17 @@ def log_usage(endpoint: str, status: int):
 def relay_request(path: str, method: str = "GET", body: dict = None):
     if not DYNAMIC_RELAY_URL: return None, {"error": "Local engine offline — tunnel not connected"}, 503
     try:
-        resp = requests.request(method, DYNAMIC_RELAY_URL.rstrip("/") + path, headers={"X-Relay-Token": RELAY_TOKEN, "Content-Type": "application/json"}, json=body, timeout=20)
+        # ADDED ngrok-skip-browser-warning HERE
+        headers = {
+            "X-Relay-Token": RELAY_TOKEN, 
+            "Content-Type": "application/json",
+            "ngrok-skip-browser-warning": "true"
+        }
+        resp = requests.request(method, DYNAMIC_RELAY_URL.rstrip("/") + path, 
+                                headers=headers, json=body, timeout=20)
         return resp, resp.json(), resp.status_code
-    except Exception as e: return None, {"error": str(e)}, 500
+    except Exception as e: 
+        return None, {"error": str(e)}, 500
 
 @app.route("/admin/set_relay", methods=["POST"])
 def set_relay():
