@@ -40,7 +40,6 @@ CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY AUTOINCREMENT, emai
 CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL REFERENCES customers(id), key_hash TEXT UNIQUE NOT NULL, key_prefix TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT, label TEXT DEFAULT 'default');
 CREATE TABLE IF NOT EXISTS usage_log (id INTEGER PRIMARY KEY AUTOINCREMENT, key_id INTEGER NOT NULL REFERENCES api_keys(id), endpoint TEXT NOT NULL, ts TEXT NOT NULL, status INTEGER NOT NULL, latency_ms INTEGER);
 CREATE TABLE IF NOT EXISTS daily_counts (key_id INTEGER NOT NULL REFERENCES api_keys(id), day TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (key_id, day));
-CREATE TABLE IF NOT EXISTS user_chaos_keys (customer_id INTEGER PRIMARY KEY REFERENCES customers(id), chaos_key_hex TEXT NOT NULL, assigned_at TEXT NOT NULL, refreshed_at TEXT);
 """
 
 def get_db():
@@ -95,16 +94,9 @@ def log_usage(endpoint: str, status: int):
 def relay_request(path: str, method: str = "GET", body: dict = None):
     if not DYNAMIC_RELAY_URL: return None, {"error": "Local engine offline — tunnel not connected"}, 503
     try:
-        headers = {
-            "X-Relay-Token": RELAY_TOKEN,
-            "Content-Type": "application/json",
-            "ngrok-skip-browser-warning": "true"
-        }
-        resp = requests.request(method, DYNAMIC_RELAY_URL.rstrip("/") + path,
-                                headers=headers, json=body, timeout=20)
+        resp = requests.request(method, DYNAMIC_RELAY_URL.rstrip("/") + path, headers={"X-Relay-Token": RELAY_TOKEN, "Content-Type": "application/json"}, json=body, timeout=20)
         return resp, resp.json(), resp.status_code
-    except Exception as e:
-        return None, {"error": str(e)}, 500
+    except Exception as e: return None, {"error": str(e)}, 500
 
 @app.route("/admin/set_relay", methods=["POST"])
 def set_relay():
@@ -183,64 +175,6 @@ def usage():
         "recent_calls": [dict(r) for r in recent],
     })
 
-# -----------------------------------------------------------------------
-# /v1/my_key  — per-user chaos key, stored in DB, refreshed on demand
-# GET  → return the user's currently stored chaos key (or 404 if none yet)
-# POST → pull the current master key from the bridge, store it, return it
-# -----------------------------------------------------------------------
-@app.route("/v1/my_key", methods=["GET", "POST"])
-@require_api_key
-def my_key():
-    db = get_db()
-
-    if request.method == "GET":
-        row = db.execute(
-            "SELECT chaos_key_hex, assigned_at, refreshed_at FROM user_chaos_keys WHERE customer_id=?",
-            (g.customer_id,)
-        ).fetchone()
-        if not row:
-            return jsonify({
-                "error": "No chaos key assigned yet. POST to /v1/my_key to claim one from the entropy engine."
-            }), 404
-        log_usage("/v1/my_key", 200)
-        return jsonify({
-            "chaos_key_hex": row["chaos_key_hex"],
-            "assigned_at":   row["assigned_at"],
-            "refreshed_at":  row["refreshed_at"],
-            "note": "POST to /v1/my_key to refresh this key with a new snapshot from the entropy engine."
-        })
-
-    # POST — fetch current master key from bridge and store/overwrite for this user
-    _, data, status = relay_request("/relay/export_key", "GET")
-    if status != 200:
-        log_usage("/v1/my_key", status)
-        return jsonify(data), status
-
-    new_key   = data.get("chaos_key")
-    ts_now    = now_iso()
-    existing  = db.execute(
-        "SELECT customer_id FROM user_chaos_keys WHERE customer_id=?", (g.customer_id,)
-    ).fetchone()
-
-    if existing:
-        db.execute(
-            "UPDATE user_chaos_keys SET chaos_key_hex=?, refreshed_at=? WHERE customer_id=?",
-            (new_key, ts_now, g.customer_id)
-        )
-    else:
-        db.execute(
-            "INSERT INTO user_chaos_keys (customer_id, chaos_key_hex, assigned_at) VALUES (?, ?, ?)",
-            (g.customer_id, new_key, ts_now)
-        )
-    db.commit()
-    log_usage("/v1/my_key", 200)
-    return jsonify({
-        "chaos_key_hex": new_key,
-        "assigned_at":   ts_now,
-        "refreshed_at":  None,
-        "note": "This key is now stored against your account. POST again anytime to refresh."
-    })
-
 @app.route("/v1/encrypt", methods=["POST"])
 @require_api_key
 def encrypt():
@@ -254,10 +188,11 @@ def encrypt():
 @require_api_key
 def decrypt():
     body = request.get_json(force=True) or {}
-    if not {"ciphertext", "nonce", "encryption_key"}.issubset(body):
+    if not {"ciphertext", "nonce", "encryption_key"}.issubset(body): 
         return jsonify({"error": "Missing ciphertext, nonce, or encryption_key"}), 400
+        
     _, data, status = relay_request("/relay/decrypt", "POST", {
-        "ciphertext": body.get("ciphertext"),
+        "ciphertext": body.get("ciphertext"), 
         "nonce": body.get("nonce"),
         "encryption_key": body.get("encryption_key")
     })
@@ -297,7 +232,6 @@ def public_register():
         return jsonify({"api_key": raw_key, "tier": "free", "quota": 100, "note": "Save this key — it won't be shown again."}), 201
     except sqlite3.IntegrityError:
         return jsonify({"error": "Email already registered."}), 409
-
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
@@ -371,8 +305,6 @@ h1 em{ font-style:italic; background:linear-gradient(125deg,var(--lime) 0%,var(-
 .section-tag{ font-family:'DM Mono',monospace;font-size:.7rem; color:var(--teal);letter-spacing:.12em;text-transform:uppercase; margin-bottom:.75rem; }
 .section-h{ font-family:'Instrument Serif',serif; font-size:clamp(1.8rem,4vw,2.8rem); color:var(--white);letter-spacing:-.02em; margin-bottom:1rem;font-weight:400;line-height:1.1; }
 .section-sub{font-size:.95rem;color:var(--mist);line-height:1.7;max-width:500px}
-
-/* ── Playground ── */
 .playground{ display:grid;grid-template-columns:1fr 1fr; gap:1px;background:var(--line); border:1px solid var(--line);border-radius:16px; overflow:hidden;margin-top:2rem; }
 .pg-pane{ background:var(--ink2);padding:1.5rem; display:flex;flex-direction:column;gap:1rem; }
 .pg-pane-header{ display:flex;align-items:center;justify-content:space-between; }
@@ -380,12 +312,10 @@ h1 em{ font-style:italic; background:linear-gradient(125deg,var(--lime) 0%,var(-
 .pg-badge{ font-family:'DM Mono',monospace;font-size:.65rem; padding:.15rem .55rem;border-radius:100px; }
 .pg-badge-enc{background:rgba(184,245,82,.12);color:var(--lime);border:1px solid rgba(184,245,82,.2)}
 .pg-badge-dec{background:rgba(82,229,200,.1);color:var(--teal);border:1px solid rgba(82,229,200,.2)}
-.pg-badge-mykey{background:rgba(255,197,61,.1);color:#ffc53d;border:1px solid rgba(255,197,61,.25)}
 textarea{ width:100%;background:var(--ink3); border:1px solid var(--line2);border-radius:8px; color:var(--paper);font-family:'DM Mono',monospace;font-size:.78rem; padding:.85rem 1rem;resize:none;outline:none;line-height:1.6; transition:border-color .2s; min-height:110px; }
 textarea:focus{border-color:var(--line)}
 textarea.out{ color:var(--lime); background:rgba(184,245,82,.03); border-color:rgba(184,245,82,.15); min-height:130px; }
 textarea.out.teal{color:var(--teal);background:rgba(82,229,200,.03);border-color:rgba(82,229,200,.15)}
-textarea.out.amber{color:#ffc53d;background:rgba(255,197,61,.03);border-color:rgba(255,197,61,.15)}
 textarea.out.err{color:var(--rose);background:rgba(255,107,138,.03);border-color:rgba(255,107,138,.15)}
 .pg-key-row{ display:flex;align-items:center;gap:.5rem; padding:.6rem .9rem; background:var(--ink3);border:1px solid var(--line2);border-radius:8px; font-family:'DM Mono',monospace;font-size:.72rem; }
 .pg-key-dot{ width:7px;height:7px;border-radius:50%;background:var(--dust);flex-shrink:0; transition:background .3s,box-shadow .3s; }
@@ -399,8 +329,6 @@ textarea.out.err{color:var(--rose);background:rgba(255,107,138,.03);border-color
 .pg-action:disabled{opacity:.35;cursor:not-allowed;transform:none;box-shadow:none}
 .pg-action.teal-btn{ background:rgba(82,229,200,.15);color:var(--teal); border:1px solid rgba(82,229,200,.2); }
 .pg-action.teal-btn:hover{background:rgba(82,229,200,.25);box-shadow:var(--glow-teal)}
-.pg-action.amber-btn{ background:rgba(255,197,61,.15);color:#ffc53d; border:1px solid rgba(255,197,61,.25); }
-.pg-action.amber-btn:hover{background:rgba(255,197,61,.25);box-shadow:0 0 30px rgba(255,197,61,.2)}
 .pg-key-setup{ grid-column:1/-1; background:var(--ink2); display:flex;align-items:center;justify-content:center; padding:2rem;gap:1rem;flex-wrap:wrap; }
 .pg-key-setup.hidden{display:none}
 .pg-setup-input{ flex:1;min-width:220px;max-width:340px; background:var(--ink3);border:1px solid var(--line2);border-radius:8px; color:var(--white);font-family:'DM Mono',monospace;font-size:.82rem; padding:.7rem 1rem;outline:none;transition:border-color .2s; }
@@ -410,15 +338,6 @@ textarea.out.err{color:var(--rose);background:rgba(255,107,138,.03);border-color
 .pg-setup-hint{ font-size:.75rem;color:var(--mist);text-align:center;width:100%; }
 .pg-setup-hint a{color:var(--lime);cursor:pointer;text-decoration:none}
 .pg-setup-hint a:hover{text-decoration:underline}
-
-/* My-Key card meta row */
-.mk-meta{ display:flex;flex-direction:column;gap:.3rem; padding:.75rem 1rem; background:var(--ink3);border:1px solid var(--line2);border-radius:8px; font-family:'DM Mono',monospace;font-size:.7rem;color:var(--mist); }
-.mk-meta span{display:flex;justify-content:space-between;gap:.5rem}
-.mk-meta strong{color:var(--paper)}
-.mk-copy-row{display:flex;gap:.6rem;align-items:stretch}
-.mk-copy-btn{ background:var(--ink3);color:var(--paper); border:1px solid var(--line2);border-radius:8px; font-family:'Outfit',sans-serif;font-weight:600;font-size:.8rem; padding:.6rem 1rem;cursor:pointer; transition:all .15s;white-space:nowrap; }
-.mk-copy-btn:hover{border-color:rgba(255,197,61,.4);color:#ffc53d}
-
 .docs-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin-top:2rem}
 .code-card{ background:var(--ink2);border:1px solid var(--line); border-radius:12px;overflow:hidden; }
 .cc-header{ display:flex;align-items:center;justify-content:space-between; padding:.75rem 1.1rem;border-bottom:1px solid var(--line); background:rgba(255,255,255,.02); }
@@ -498,42 +417,15 @@ footer{ border-top:1px solid var(--line); padding:2.5rem 2.5rem; display:flex;al
   <section class="section sr">
     <div class="section-tag">Playground</div>
     <div class="section-h">Encrypt something right now.</div>
-    <p class="section-sub">Paste your API key once — it stays for this session. Claim your personal chaos key, then encrypt and decrypt.</p>
+    <p class="section-sub">Paste your key once — it stays for this session. Encrypt, decrypt, verify it all works.</p>
 
     <div class="playground" id="playground">
-
-      <!-- ── Key setup / entry ── -->
       <div class="pg-key-setup" id="pg-key-setup">
         <input class="pg-setup-input" type="text" id="pg-key-input" placeholder="Paste your API key (ck_live_…)" autocomplete="off" spellcheck="false" onkeydown="if(event.key==='Enter')activateKey()">
         <button class="pg-setup-btn" onclick="activateKey()">Activate →</button>
         <p class="pg-setup-hint">No key? <a onclick="scrollToTop()">Get one free above ↑</a></p>
       </div>
 
-      <!-- ── My Chaos Key pane (new) ── -->
-      <div class="pg-pane" id="pane-mykey" style="display:none; grid-column:1/-1; border-bottom:1px solid var(--line);">
-        <div class="pg-pane-header">
-          <span class="pg-pane-label">My Chaos Key</span>
-          <span class="pg-badge pg-badge-mykey">PER-USER · STORED</span>
-        </div>
-        <p style="font-size:.75rem;color:var(--mist);line-height:1.6">
-          This is <strong style="color:var(--paper)">your personal chaos key</strong> — a snapshot of the entropy engine saved to your account.
-          It persists until you refresh it. Use it directly with the encrypt/decrypt endpoints by passing it as <code style="color:var(--lime);background:var(--ink3);padding:.1rem .35rem;border-radius:4px">encryption_key</code>.
-        </p>
-        <div class="mk-meta" id="mk-meta" style="display:none">
-          <span><span>Chaos key</span><strong id="mk-key-preview">—</strong></span>
-          <span><span>Assigned</span><strong id="mk-assigned">—</strong></span>
-          <span><span>Last refreshed</span><strong id="mk-refreshed">—</strong></span>
-        </div>
-        <textarea class="out amber" id="mk-key-full" rows="2" readonly style="display:none; word-break:break-all; min-height:unset; font-size:.72rem;"></textarea>
-        <div class="mk-copy-row">
-          <button class="pg-action amber-btn" style="flex:1" onclick="fetchMyKey()">↓ Load my stored key</button>
-          <button class="pg-action amber-btn" style="flex:1" onclick="refreshMyKey()">⟳ Refresh from entropy engine</button>
-          <button class="mk-copy-btn" id="mk-copy-btn" style="display:none" onclick="copyMyKey()">Copy key</button>
-        </div>
-        <div id="mk-msg" style="font-family:'DM Mono',monospace;font-size:.72rem;color:var(--mist);min-height:1.2rem;"></div>
-      </div>
-
-      <!-- ── Encrypt pane ── -->
       <div class="pg-pane" id="pane-enc" style="display:none">
         <div class="pg-pane-header"><span class="pg-pane-label">Plaintext</span><span class="pg-badge pg-badge-enc">ENCRYPT</span></div>
         <div class="pg-key-row"><div class="pg-key-dot set" id="enc-dot"></div><span class="pg-key-text set" id="enc-key-label">ck_live_…</span><button class="pg-key-clear" onclick="clearKey()" title="Change key">✕</button></div>
@@ -542,7 +434,6 @@ footer{ border-top:1px solid var(--line); padding:2.5rem 2.5rem; display:flex;al
         <textarea class="out" id="enc-output" rows="5" readonly placeholder="Encrypted output will appear here…"></textarea>
       </div>
 
-      <!-- ── Decrypt pane ── -->
       <div class="pg-pane" id="pane-dec" style="display:none">
         <div class="pg-pane-header"><span class="pg-pane-label">Ciphertext</span><span class="pg-badge pg-badge-dec">DECRYPT</span></div>
         <p style="font-size:.75rem;color:var(--mist);line-height:1.5">Because keys rotate every 10s, you must provide the specific key returned during encryption.</p>
@@ -550,20 +441,18 @@ footer{ border-top:1px solid var(--line); padding:2.5rem 2.5rem; display:flex;al
         <button class="pg-action teal-btn" onclick="doDecrypt()">Decrypt →</button>
         <textarea class="out teal" id="dec-output" rows="4" readonly placeholder="Decrypted plaintext will appear here…"></textarea>
       </div>
-
-      <!-- ── Export master key pane ── -->
+      
       <div class="pg-pane" id="pane-export" style="display:none; grid-column: 1 / -1;">
         <div class="pg-pane-header">
-          <span class="pg-pane-label">Live Master Key (current 10s window)</span>
+          <span class="pg-pane-label">Master Chaos Key</span>
           <span class="pg-badge" style="background:rgba(255,107,138,.12);color:var(--rose);border:1px solid rgba(255,107,138,.2)">EXPORT</span>
         </div>
-        <p style="font-size:.75rem;color:var(--mist);line-height:1.5">Retrieves the <em>currently active</em> 10-second master key directly from the physical entropy engine. This changes every 10s. Use <strong style="color:var(--paper)">My Chaos Key</strong> above to store a stable snapshot instead.</p>
+        <p style="font-size:.75rem;color:var(--mist);line-height:1.5">This retrieves the *currently active* 10-second master key directly from the physical entropy engine.</p>
         <div style="display:flex; gap:1rem;">
-          <button class="pg-action" style="background:transparent; border:1px solid var(--rose); color:var(--rose);" onclick="exportChaosKey()">Reveal Active Master Key</button>
+            <button class="pg-action" style="background:transparent; border:1px solid var(--rose); color:var(--rose);" onclick="exportChaosKey()">Reveal Active Master Key</button>
         </div>
         <textarea class="out" id="export-output" rows="2" readonly style="display:none; margin-top:1rem;"></textarea>
       </div>
-
     </div>
   </section>
 
@@ -582,16 +471,13 @@ BASE = <span class="ts">"https://your-app.onrender.com"</span>
 KEY  = <span class="ts">"ck_live_YOUR_KEY"</span>
 H    = {<span class="ts">"Authorization"</span>: <span class="ts">f"Bearer {KEY}"</span>}
 
-<span class="tc"># Claim / refresh your personal chaos key</span>
-r = requests.<span class="tm">post</span>(f<span class="ts">"{BASE}/v1/my_key"</span>, headers=H)
-my_chaos_key = r.json()[<span class="ts">"chaos_key_hex"</span>]
-
 <span class="tc"># Encrypt</span>
 r = requests.<span class="tm">post</span>(f<span class="ts">"{BASE}/v1/encrypt"</span>, headers=H,
         json={<span class="ts">"plaintext"</span>: <span class="ts">"secret data"</span>})
 enc = r.json()
+<span class="tc"># Contains: ciphertext, nonce, encryption_key</span>
 
-<span class="tc"># Decrypt</span>
+<span class="tc"># Decrypt (Pass the entire object back)</span>
 r = requests.<span class="tm">post</span>(f<span class="ts">"{BASE}/v1/decrypt"</span>, headers=H,
         json=enc)
 print(r.json()[<span class="ts">"plaintext"</span>])  <span class="tc"># → "secret data"</span></pre>
@@ -602,10 +488,6 @@ print(r.json()[<span class="ts">"plaintext"</span>])  <span class="tc"># → "se
         <pre id="c2"><span class="tk">const</span> BASE = <span class="ts">"https://your-app.onrender.com"</span>;
 <span class="tk">const</span> KEY  = <span class="ts">"ck_live_YOUR_KEY"</span>;
 <span class="tk">const</span> H    = { <span class="ts">"Authorization"</span>: <span class="ts">`Bearer ${KEY}`</span>, <span class="ts">"Content-Type"</span>: <span class="ts">"application/json"</span> };
-
-<span class="tc">// Claim / refresh your personal chaos key</span>
-<span class="tk">const</span> {chaos_key_hex} = <span class="tk">await</span> <span class="tm">fetch</span>(<span class="ts">`${BASE}/v1/my_key`</span>,
-  { method: <span class="ts">"POST"</span>, headers: H }).<span class="tm">then</span>(r => r.<span class="tm">json</span>());
 
 <span class="tc">// Encrypt</span>
 <span class="tk">const</span> enc = <span class="tk">await</span> <span class="tm">fetch</span>(<span class="ts">`${BASE}/v1/encrypt`</span>, {
@@ -618,23 +500,15 @@ print(r.json()[<span class="ts">"plaintext"</span>])  <span class="tc"># → "se
   method: <span class="ts">"POST"</span>, headers: H,
   body: JSON.<span class="tm">stringify</span>(enc)
 }).<span class="tm">then</span>(r => r.<span class="tm">json</span>());
-console.<span class="tm">log</span>(out.plaintext);</pre>
+console.<span class="tm">log</span>(out.plaintext); <span class="tc">// → "secret"</span></pre>
       </div>
 
       <div class="code-card">
         <div class="cc-header"><div class="cc-dots"><span class="d1"></span><span class="d2"></span><span class="d3"></span></div><span class="cc-lang">API REFERENCE</span><button class="cc-copy" onclick="cpCode(this,'c4')">copy</button></div>
-        <pre id="c4"><span class="tc"># Register (get a free API key)</span>
+        <pre id="c4"><span class="tc"># Register (get a free key)</span>
 <span class="tm">POST</span> /v1/register
   body: { <span class="ts">"email"</span>: <span class="ts">"you@example.com"</span> }
   → { <span class="ts">"api_key"</span>: <span class="ts">"ck_live_…"</span> }
-
-<span class="tc"># Get your stored chaos key</span>
-<span class="tm">GET</span>  /v1/my_key  <span class="tn">[Bearer token]</span>
-  → { <span class="ts">"chaos_key_hex"</span>: <span class="ts">"…"</span>, <span class="ts">"assigned_at"</span>: <span class="ts">"…"</span> }
-
-<span class="tc"># Refresh / claim chaos key from engine</span>
-<span class="tm">POST</span> /v1/my_key  <span class="tn">[Bearer token]</span>
-  → { <span class="ts">"chaos_key_hex"</span>: <span class="ts">"…"</span>, <span class="ts">"assigned_at"</span>: <span class="ts">"…"</span> }
 
 <span class="tc"># Encrypt plaintext</span>
 <span class="tm">POST</span> /v1/encrypt  <span class="tn">[Bearer token]</span>
@@ -657,136 +531,127 @@ console.<span class="tm">log</span>(out.plaintext);</pre>
 
 <script>
 (function(){
-  const cv=document.getElementById('entropy-canvas');const cx=cv.getContext('2d');
-  let W,H,particles=[];const N=90,SPEED=.4;
-  function resize(){W=cv.width=innerWidth;H=cv.height=innerHeight;}
-  resize();addEventListener('resize',resize);
+  const cv = document.getElementById('entropy-canvas'); const cx = cv.getContext('2d');
+  let W,H,particles=[]; const N=90, SPEED=.4;
+  function resize(){ W=cv.width=innerWidth; H=cv.height=innerHeight; }
+  resize(); addEventListener('resize',resize);
   class Particle{
     constructor(){this.reset(true)}
-    reset(init){this.x=Math.random()*W;this.y=init?Math.random()*H:(Math.random()<.5?-4:H+4);this.vx=(Math.random()-.5)*SPEED;this.vy=(Math.random()*.6+.2)*SPEED*(this.y<0?1:-1);this.r=Math.random()*1.5+.4;this.life=0;this.maxLife=300+Math.random()*400;this.hue=Math.random()<.6?150:175;}
-    step(){const t=Date.now()*.0003;const nx=this.x/W*4+t,ny=this.y/H*4+t*.7;const angle=(Math.sin(nx)*Math.cos(ny))*Math.PI*2;this.vx+=Math.cos(angle)*.008;this.vy+=Math.sin(angle)*.008;this.vx*=.98;this.vy*=.98;this.x+=this.vx;this.y+=this.vy;this.life++;if(this.life>this.maxLife||this.x<-10||this.x>W+10||this.y<-10||this.y>H+10)this.reset(false);}
-    draw(){const alpha=Math.min(this.life/60,1)*Math.min((this.maxLife-this.life)/60,1)*.6;cx.beginPath();cx.arc(this.x,this.y,this.r,0,Math.PI*2);cx.fillStyle=`hsla(${this.hue},90%,65%,${alpha})`;cx.fill();}
+    reset(init){
+      this.x = Math.random()*W; this.y = init ? Math.random()*H : (Math.random()<.5?-4:H+4);
+      this.vx = (Math.random()-.5)*SPEED; this.vy = (Math.random()*.6+.2)*SPEED*(this.y<0?1:-1);
+      this.r  = Math.random()*1.5+.4; this.life=0; this.maxLife=300+Math.random()*400;
+      this.hue = Math.random()<.6?150:175;
+    }
+    step(){
+      const t=Date.now()*.0003; const nx=this.x/W*4+t, ny=this.y/H*4+t*.7;
+      const angle=(Math.sin(nx)*Math.cos(ny))*Math.PI*2;
+      this.vx+=Math.cos(angle)*.008; this.vy+=Math.sin(angle)*.008;
+      this.vx*=.98; this.vy*=.98; this.x+=this.vx; this.y+=this.vy; this.life++;
+      if(this.life>this.maxLife||this.x<-10||this.x>W+10||this.y<-10||this.y>H+10) this.reset(false);
+    }
+    draw(){
+      const alpha=Math.min(this.life/60,1)*Math.min((this.maxLife-this.life)/60,1)*.6;
+      cx.beginPath(); cx.arc(this.x,this.y,this.r,0,Math.PI*2); cx.fillStyle=`hsla(${this.hue},90%,65%,${alpha})`; cx.fill();
+    }
   }
-  for(let i=0;i<N;i++)particles.push(new Particle());
-  function draw(){cx.clearRect(0,0,W,H);for(let i=0;i<particles.length;i++){for(let j=i+1;j<particles.length;j++){const dx=particles[i].x-particles[j].x,dy=particles[i].y-particles[j].y,d=Math.sqrt(dx*dx+dy*dy);if(d<120){cx.beginPath();cx.moveTo(particles[i].x,particles[i].y);cx.lineTo(particles[j].x,particles[j].y);cx.strokeStyle=`rgba(184,245,82,${(1-d/120)*.07})`;cx.lineWidth=.5;cx.stroke();}}}particles.forEach(p=>{p.step();p.draw()});requestAnimationFrame(draw);}
+  for(let i=0;i<N;i++) particles.push(new Particle());
+  function draw(){
+    cx.clearRect(0,0,W,H);
+    for(let i=0;i<particles.length;i++){
+      for(let j=i+1;j<particles.length;j++){
+        const dx=particles[i].x-particles[j].x, dy=particles[i].y-particles[j].y, d=Math.sqrt(dx*dx+dy*dy);
+        if(d<120){ cx.beginPath(); cx.moveTo(particles[i].x,particles[i].y); cx.lineTo(particles[j].x,particles[j].y); cx.strokeStyle=`rgba(184,245,82,${(1-d/120)*.07})`; cx.lineWidth=.5; cx.stroke(); }
+      }
+    }
+    particles.forEach(p=>{p.step();p.draw()}); requestAnimationFrame(draw);
+  }
   draw();
 })();
 
-let _key=sessionStorage.getItem('ck_key')||'';
-let _newKey='';
-let _myKeyHex='';
+let _key = sessionStorage.getItem('ck_key') || '';
+let _newKey = '';
 
 async function pollStatus(){
   try{
     const d=await(await fetch('/health')).json();
-    const dot=document.getElementById('nav-dot'),txt=document.getElementById('nav-txt'),pill=document.getElementById('nav-pill');
-    if(d.tunnel_active){dot.classList.add('live');pill.classList.add('live');txt.textContent='Engine online';}
-    else{dot.classList.remove('live');pill.classList.remove('live');txt.textContent='Engine offline';}
-    try{const s=await(await fetch('/public/stats')).json();document.getElementById('s-customers').textContent=s.total_customers??'—';document.getElementById('s-today').textContent=s.today_requests??'—';}catch(e){}
+    const dot=document.getElementById('nav-dot'), txt=document.getElementById('nav-txt'), pill=document.getElementById('nav-pill');
+    if(d.tunnel_active){ dot.classList.add('live'); pill.classList.add('live'); txt.textContent='Engine online'; }
+    else { dot.classList.remove('live'); pill.classList.remove('live'); txt.textContent='Engine offline'; }
+    try{
+      const s=await(await fetch('/public/stats')).json();
+      document.getElementById('s-customers').textContent=s.total_customers??'—';
+      document.getElementById('s-today').textContent=s.today_requests??'—';
+    }catch(e){}
   }catch(e){}
 }
-pollStatus();setInterval(pollStatus,6000);
+pollStatus(); setInterval(pollStatus,6000);
 
 async function getKey(){
-  const emailEl=document.getElementById('gkw-email'),btn=document.getElementById('gkw-btn'),msg=document.getElementById('gkw-msg'),email=emailEl.value.trim();
-  if(!email||!email.includes('@')){msg.textContent='Enter a valid email address.';msg.className='gkw-msg err';return;}
-  btn.disabled=true;msg.textContent='Generating your key…';msg.className='gkw-msg';
+  const emailEl=document.getElementById('gkw-email'), btn=document.getElementById('gkw-btn'), msg=document.getElementById('gkw-msg'), email=emailEl.value.trim();
+  if(!email||!email.includes('@')){ msg.textContent='Enter a valid email address.'; msg.className='gkw-msg err'; return; }
+  btn.disabled=true; msg.textContent='Generating your key…'; msg.className='gkw-msg';
   try{
-    const {ok,data}=await apiFetch('/v1/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});
-    if(ok){_newKey=data.api_key;document.getElementById('kr-key-text').textContent=data.api_key;document.getElementById('key-result').classList.add('show');document.getElementById('gkw').style.display='none';msg.textContent='';}
-    else{msg.textContent='✗ '+(data.error||'Registration failed');msg.className='gkw-msg err';btn.disabled=false;}
-  }catch(e){msg.textContent='✗ Network error — try again';msg.className='gkw-msg err';btn.disabled=false;}
+    const {ok,data}=await apiFetch('/v1/register',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email}) });
+    if(ok){
+      _newKey=data.api_key;
+      document.getElementById('kr-key-text').textContent=data.api_key; document.getElementById('key-result').classList.add('show'); document.getElementById('gkw').style.display='none'; msg.textContent=''; 
+    } else { msg.textContent='✗ '+(data.error||'Registration failed'); msg.className='gkw-msg err'; btn.disabled=false; }
+  }catch(e){ msg.textContent='✗ Network error — try again'; msg.className='gkw-msg err'; btn.disabled=false; }
 }
-document.getElementById('gkw-email').addEventListener('keydown',e=>{if(e.key==='Enter')getKey();});
-function copyKeyResult(el){navigator.clipboard.writeText(document.getElementById('kr-key-text').textContent).then(()=>{const hint=el.querySelector('.kr-copy-hint');if(hint){hint.textContent='copied!';setTimeout(()=>hint.textContent='click to copy',2000);}});}
-function useKeyInPlayground(){const k=_newKey||document.getElementById('kr-key-text').textContent;sessionStorage.setItem('ck_key',k);_key=k;activateKeyValue(k);document.getElementById('playground').scrollIntoView({behavior:'smooth',block:'start'});}
-function scrollToTop(){document.getElementById('gkw').scrollIntoView({behavior:'smooth',block:'center'});}
-function activateKey(){const v=document.getElementById('pg-key-input').value.trim();if(!v)return;sessionStorage.setItem('ck_key',v);_key=v;activateKeyValue(v);}
-
+document.getElementById('gkw-email').addEventListener('keydown',e=>{if(e.key==='Enter')getKey()});
+function copyKeyResult(el){
+  navigator.clipboard.writeText(document.getElementById('kr-key-text').textContent).then(()=>{
+    const hint=el.querySelector('.kr-copy-hint'); if(hint){hint.textContent='copied!';setTimeout(()=>hint.textContent='click to copy',2000)}
+  });
+}
+function useKeyInPlayground(){ const k=_newKey||document.getElementById('kr-key-text').textContent; sessionStorage.setItem('ck_key',k); _key=k; activateKeyValue(k); document.getElementById('playground').scrollIntoView({behavior:'smooth',block:'start'}); }
+function scrollToTop(){ document.getElementById('gkw').scrollIntoView({behavior:'smooth',block:'center'}); }
+function activateKey(){ const v=document.getElementById('pg-key-input').value.trim(); if(!v)return; sessionStorage.setItem('ck_key',v); _key=v; activateKeyValue(v); }
 function activateKeyValue(k){
   document.getElementById('pg-key-setup').classList.add('hidden');
-  ['pane-mykey','pane-enc','pane-dec','pane-export'].forEach(id=>{
-    const el=document.getElementById(id);
-    el.style.display=(id==='pane-mykey'||id==='pane-export')?'block':'flex';
-    if(id==='pane-enc'||id==='pane-dec') el.style.flexDirection='column';
-  });
+  document.getElementById('pane-enc').style.display='flex'; document.getElementById('pane-enc').style.flexDirection='column';
+  document.getElementById('pane-dec').style.display='flex'; document.getElementById('pane-dec').style.flexDirection='column';
+  document.getElementById('pane-export').style.display='block';
   document.getElementById('enc-key-label').textContent=k.length>22?k.slice(0,22)+'…':k;
 }
-
 function clearKey(){
-  sessionStorage.removeItem('ck_key');_key='';_myKeyHex='';
-  document.getElementById('pg-key-setup').classList.remove('hidden');
-  ['pane-mykey','pane-enc','pane-dec','pane-export'].forEach(id=>document.getElementById(id).style.display='none');
-  document.getElementById('pg-key-input').value='';
-  document.getElementById('enc-output').value='';document.getElementById('dec-output').value='';document.getElementById('dec-input').value='';
-  document.getElementById('export-output').style.display='none';document.getElementById('export-output').value='';
-  document.getElementById('mk-key-full').style.display='none';document.getElementById('mk-meta').style.display='none';
-  document.getElementById('mk-copy-btn').style.display='none';document.getElementById('mk-msg').textContent='';
+  sessionStorage.removeItem('ck_key'); _key=''; document.getElementById('pg-key-setup').classList.remove('hidden');
+  document.getElementById('pane-enc').style.display='none'; document.getElementById('pane-dec').style.display='none'; document.getElementById('pane-export').style.display='none';
+  document.getElementById('pg-key-input').value=''; document.getElementById('enc-output').value=''; document.getElementById('dec-output').value=''; document.getElementById('dec-input').value='';
+  document.getElementById('export-output').style.display='none'; document.getElementById('export-output').value='';
 }
-if(_key)activateKeyValue(_key);
-
-/* ── My Chaos Key ── */
-function _renderMyKey(data){
-  _myKeyHex=data.chaos_key_hex;
-  const full=document.getElementById('mk-key-full');
-  full.value=data.chaos_key_hex;full.style.display='block';
-  document.getElementById('mk-copy-btn').style.display='inline-flex';
-  document.getElementById('mk-meta').style.display='flex';
-  document.getElementById('mk-key-preview').textContent=data.chaos_key_hex.slice(0,12)+'…'+data.chaos_key_hex.slice(-6);
-  document.getElementById('mk-assigned').textContent=data.assigned_at?new Date(data.assigned_at).toLocaleString():'—';
-  document.getElementById('mk-refreshed').textContent=data.refreshed_at?new Date(data.refreshed_at).toLocaleString():'never';
-}
-async function fetchMyKey(){
-  const msg=document.getElementById('mk-msg');msg.textContent='Loading stored key…';msg.style.color='var(--mist)';
-  const {ok,data}=await apiFetch('/v1/my_key',{method:'GET',headers:{Authorization:'Bearer '+_key}});
-  if(ok){_renderMyKey(data);msg.textContent='✓ Key loaded from your account.';msg.style.color='var(--lime)';}
-  else if(data.error&&data.error.includes('No chaos key')){msg.textContent='No key yet — click "Refresh from entropy engine" to claim one.';msg.style.color='#ffc53d';}
-  else{msg.textContent='✗ '+(data.error||JSON.stringify(data));msg.style.color='var(--rose)';}
-}
-async function refreshMyKey(){
-  const msg=document.getElementById('mk-msg');msg.textContent='Pulling snapshot from entropy engine…';msg.style.color='var(--mist)';
-  const {ok,data}=await apiFetch('/v1/my_key',{method:'POST',headers:{Authorization:'Bearer '+_key,'Content-Type':'application/json'}});
-  if(ok){_renderMyKey(data);msg.textContent='✓ New chaos key saved to your account.';msg.style.color='var(--lime)';}
-  else{msg.textContent='✗ '+(data.error||JSON.stringify(data));msg.style.color='var(--rose)';}
-}
-function copyMyKey(){
-  if(!_myKeyHex)return;
-  navigator.clipboard.writeText(_myKeyHex).then(()=>{
-    const btn=document.getElementById('mk-copy-btn');btn.textContent='Copied!';setTimeout(()=>btn.textContent='Copy key',2000);
-  });
-}
+if(_key) activateKeyValue(_key);
 
 async function doEncrypt(){
-  const plain=document.getElementById('enc-input').value.trim(),out=document.getElementById('enc-output');
-  if(!plain){out.value='⚠ Enter some text first.';out.className='out err';return;}
-  out.value='Encrypting…';out.className='out';
-  const {ok,data}=await apiFetch('/v1/encrypt',{method:'POST',headers:{Authorization:'Bearer '+_key,'Content-Type':'application/json'},body:JSON.stringify({plaintext:plain})});
-  if(ok){out.value=JSON.stringify(data,null,2);out.className='out';document.getElementById('dec-input').value=JSON.stringify(data,null,2);}
-  else{out.value='✗ '+(data.error||JSON.stringify(data));out.className='out err';}
+  const plain=document.getElementById('enc-input').value.trim(), out=document.getElementById('enc-output');
+  if(!plain){out.value='⚠ Enter some text first.';out.className='out err';return}
+  out.value='Encrypting…'; out.className='out';
+  const {ok,data}=await apiFetch('/v1/encrypt',{ method:'POST', headers:{'Authorization':'Bearer '+_key,'Content-Type':'application/json'}, body:JSON.stringify({plaintext:plain}) });
+  if(ok){ out.value=JSON.stringify(data,null,2); out.className='out'; document.getElementById('dec-input').value=JSON.stringify(data,null,2); } 
+  else { out.value='✗ '+(data.error||JSON.stringify(data)); out.className='out err'; }
 }
 async function doDecrypt(){
-  const raw=document.getElementById('dec-input').value.trim(),out=document.getElementById('dec-output');
-  if(!raw){out.value='⚠ Paste ciphertext JSON or encrypt something first.';out.className='out err';return;}
-  let body;try{body=JSON.parse(raw)}catch(e){out.value='✗ Invalid JSON.';out.className='out err';return;}
-  if(!body.ciphertext||!body.nonce||!body.encryption_key){out.value='✗ JSON needs "ciphertext", "nonce", and "encryption_key".';out.className='out err';return;}
-  out.value='Decrypting…';out.className='out teal';
-  const {ok,data}=await apiFetch('/v1/decrypt',{method:'POST',headers:{Authorization:'Bearer '+_key,'Content-Type':'application/json'},body:JSON.stringify({ciphertext:body.ciphertext,nonce:body.nonce,encryption_key:body.encryption_key})});
-  if(ok){out.value=data.plaintext??JSON.stringify(data);out.className='out teal';}
-  else{out.value='✗ '+(data.error||JSON.stringify(data));out.className='out err';}
+  const raw=document.getElementById('dec-input').value.trim(), out=document.getElementById('dec-output');
+  if(!raw){out.value='⚠ Paste ciphertext JSON or encrypt something first.';out.className='out err';return}
+  let body; try{body=JSON.parse(raw)}catch(e){out.value='✗ Invalid JSON.';out.className='out err';return}
+  if(!body.ciphertext||!body.nonce||!body.encryption_key){ out.value='✗ JSON needs "ciphertext", "nonce", and "encryption_key".'; out.className='out err';return }
+  out.value='Decrypting…'; out.className='out teal';
+  const {ok,data}=await apiFetch('/v1/decrypt',{ method:'POST', headers:{'Authorization':'Bearer '+_key,'Content-Type':'application/json'}, body:JSON.stringify({ ciphertext: body.ciphertext, nonce: body.nonce, encryption_key: body.encryption_key }) });
+  if(ok){ out.value=data.plaintext??JSON.stringify(data); out.className='out teal'; } else { out.value='✗ '+(data.error||JSON.stringify(data)); out.className='out err'; }
 }
 async function exportChaosKey(){
-  const out=document.getElementById('export-output');out.style.display='block';out.value='Requesting raw master key...';out.className='out';
-  const {ok,data}=await apiFetch('/v1/export_key',{method:'GET',headers:{Authorization:'Bearer '+_key}});
-  if(ok){out.value=data.chaos_key??JSON.stringify(data);}
-  else{out.value='✗ '+(data.error||JSON.stringify(data));out.className='out err';}
+  const out = document.getElementById('export-output'); out.style.display = 'block'; out.value = 'Requesting raw master key...'; out.className = 'out';
+  const {ok, data} = await apiFetch('/v1/export_key', { method:'GET', headers:{'Authorization':'Bearer '+_key} });
+  if(ok){ out.value = data.chaos_key ?? JSON.stringify(data); } else { out.value = '✗ '+(data.error||JSON.stringify(data)); out.className = 'out err'; }
 }
 async function apiFetch(path,opts){
-  const r=await fetch(path,opts),ct=r.headers.get('Content-Type')||'';let data;
-  if(ct.includes('application/json')){data=await r.json();}else{const t=await r.text(),m=t.match(/<title>([^<]*)<\/title>/i);data={error:m?m[1]:'HTTP '+r.status};}
+  const r=await fetch(path,opts), ct=r.headers.get('Content-Type')||''; let data;
+  if(ct.includes('application/json')){data=await r.json()} else{ const t=await r.text(), m=t.match(/<title>([^<]*)<\/title>/i); data={error:m?m[1]:'HTTP '+r.status}; }
   return{ok:r.ok,status:r.status,data};
 }
-function cpCode(btn,id){navigator.clipboard.writeText(document.getElementById(id).innerText).then(()=>{btn.textContent='copied!';btn.classList.add('ok');setTimeout(()=>{btn.textContent='copy';btn.classList.remove('ok');},2000);});}
-const sro=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');sro.unobserve(e.target);}});},{threshold:.07});
+function cpCode(btn,id){ navigator.clipboard.writeText(document.getElementById(id).innerText).then(()=>{ btn.textContent='copied!'; btn.classList.add('ok'); setTimeout(()=>{btn.textContent='copy';btn.classList.remove('ok')},2000); }); }
+const sro=new IntersectionObserver(es=>{ es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');sro.unobserve(e.target)}}); },{threshold:.07});
 document.querySelectorAll('.sr').forEach(el=>sro.observe(el));
 </script>
 </body>
