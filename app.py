@@ -43,11 +43,11 @@ except ImportError:
 RELAY_TOKEN       = os.getenv("RELAY_TOKEN", "60214a27a9f1ee39361b70b3fa8c98d6")
 ADMIN_SECRET      = os.getenv("ADMIN_SECRET", "change-me-in-production")
 DATABASE_URL      = os.getenv("DATABASE_URL", "")          # Render PostgreSQL URL
-DB_PATH           = os.getenv("DB_PATH", "cryptoapi.db")   # SQLite fallback
+DB_PATH           = os.getenv("DB_PATH", "postgresql://postgres:[YOUR-PASSWORD]@db.jwwzzvgjqairoajsnbsr.supabase.co:5432/postgres")   # SQLite fallback
 DYNAMIC_RELAY_URL = os.getenv("RELAY_URL", "")
 
 # Admin seed — set these in Render environment variables
-ADMIN_EMAIL       = os.getenv("ADMIN_EMAIL", "admin@chaoskey.io")
+ADMIN_EMAIL       = os.getenv("ADMIN_EMAIL", "admin@admin.com")
 ADMIN_PASSWORD    = os.getenv("ADMIN_PASSWORD", "")        # MUST set in env
 
 FREE_QUOTA_DAY  = 100
