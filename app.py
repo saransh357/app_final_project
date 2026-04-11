@@ -42,7 +42,7 @@ except ImportError:
 # ── Config ────────────────────────────────────────────────────────────────────
 RELAY_TOKEN       = os.getenv("RELAY_TOKEN", "60214a27a9f1ee39361b70b3fa8c98d6")
 ADMIN_SECRET      = os.getenv("ADMIN_SECRET", "change-me-in-production")
-DATABASE_URL      = os.getenv("DATABASE_URL", "psql -h db.jwwzzvgjqairoajsnbsr.supabase.co -p 5432 -d postgres -U postgres")          # Render PostgreSQL URL
+DATABASE_URL      = os.getenv("DATABASE_URL", "")          # Render PostgreSQL URL
 DB_PATH           = os.getenv("DB_PATH", "")   # SQLite fallback
 DYNAMIC_RELAY_URL = os.getenv("RELAY_URL", "")
 
