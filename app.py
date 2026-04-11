@@ -1064,8 +1064,13 @@ def index():
     return render_template_string(DASHBOARD_HTML)
 
 
-# Init runs before first request (Render/Gunicorn compatible)
-init_db()
+# At the bottom of your app.py
+try:
+    init_db()
+except Exception as e:
+    log.error(f"CRITICAL: Database initialization failed: {e}")
+    # We don't exit(1) so the health check might still pass, 
+    # but the app will show errors when DB endpoints are hit.
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=False)
