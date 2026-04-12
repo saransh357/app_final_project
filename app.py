@@ -42,11 +42,11 @@ except ImportError:
             return False
 
 # ── Config ────────────────────────────────────────────────────────────────────
-RELAY_TOKEN       = os.getenv("RELAY_TOKEN", "7c9a2f1b8e4d0a92b3c4d5e6f7a8b9c0")
-ADMIN_SECRET      = os.getenv("ADMIN_SECRET", "change-me-in-production")
+RELAY_TOKEN       = os.getenv("RELAY_TOKEN", "")
+ADMIN_SECRET      = os.getenv("ADMIN_SECRET", "")
 DATABASE_URL      = os.getenv("DATABASE_URL", "")
 DB_PATH           = os.getenv("DB_PATH", "chaoskey.db")
-DYNAMIC_RELAY_URL = os.getenv("RELAY_URL", "http://localhost:5005")
+DYNAMIC_RELAY_URL = os.getenv("RELAY_URL", "")
 
 ADMIN_EMAIL       = os.getenv("ADMIN_EMAIL", "admin@admin.com")
 ADMIN_PASSWORD    = os.getenv("ADMIN_PASSWORD", "")
@@ -58,6 +58,12 @@ KEY_PREFIX      = "ck_live_"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("CryptoAPI")
+
+if not RELAY_TOKEN:
+    log.warning("RELAY_TOKEN env var not set — bridge authentication disabled. "
+                "Set RELAY_TOKEN on Render to match BRIDGE_SECRET in your local .env.")
+if not ADMIN_SECRET:
+    log.warning("ADMIN_SECRET env var not set — admin endpoints are unprotected!")
 
 app = Flask("CryptoAPI")
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
@@ -336,9 +342,6 @@ def relay_request(path, method="GET", body=None):
             },
             json=body, timeout=20
         )
-        # Guard: if the tunnel/proxy returned an HTML error page (e.g. Cloudflare
-        # 502/524 when the local bridge is down) resp.json() would raise a
-        # JSONDecodeError.  Catch it and return a human-readable error instead.
         try:
             data = resp.json()
         except Exception:
@@ -348,9 +351,20 @@ def relay_request(path, method="GET", body=None):
                     "The local encryption bridge may be down — check the launcher."
                 )
             }
+
+        # 403 from the bridge always means a token mismatch — give a clear message
+        if resp.status_code == 403:
+            data = {
+                "error": (
+                    "Bridge rejected the request (token mismatch). "
+                    "RELAY_TOKEN on Render must exactly match BRIDGE_SECRET in your local .env. "
+                    "Check both values and redeploy if you changed RELAY_TOKEN."
+                )
+            }
+
         return resp, data, resp.status_code
     except requests.exceptions.ConnectionError:
-        return None, {"error": "Cannot reach the local bridge — is the launcher running?"}, 503
+        return None, {"error": "Cannot reach the local bridge — is the launcher running and tunnel active?"}, 503
     except requests.exceptions.Timeout:
         return None, {"error": "Bridge timed out — the local machine may be overloaded"}, 504
     except Exception as e:
@@ -731,6 +745,7 @@ def health():
     return jsonify({
         "status":        "ok",
         "tunnel_active": bool(DYNAMIC_RELAY_URL),
+        "relay_url":     DYNAMIC_RELAY_URL or None,
         "db_backend":    "postgresql" if USE_POSTGRES else "sqlite",
     })
 
