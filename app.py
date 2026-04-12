@@ -42,10 +42,10 @@ except ImportError:
             return False
 
 # ── Config ────────────────────────────────────────────────────────────────────
-RELAY_TOKEN       = os.getenv("RELAY_TOKEN", "")
-ADMIN_SECRET      = os.getenv("ADMIN_SECRET", "")
+RELAY_TOKEN       = os.getenv("RELAY_TOKEN", "7c9a2f1b8e4d0a92b3c4d5e6f7a8b9c0")
+ADMIN_SECRET      = os.getenv("ADMIN_SECRET", "change-me-in-production")
 DATABASE_URL      = os.getenv("DATABASE_URL", "")
-DB_PATH           = os.getenv("DB_PATH", "")
+DB_PATH           = os.getenv("DB_PATH", "chaoskey.db")
 DYNAMIC_RELAY_URL = os.getenv("RELAY_URL", "http://localhost:5005")
 
 ADMIN_EMAIL       = os.getenv("ADMIN_EMAIL", "admin@admin.com")
@@ -326,7 +326,7 @@ def log_usage(endpoint: str, status: int):
 # ── Relay helper ──────────────────────────────────────────────────────────────
 def relay_request(path, method="GET", body=None):
     if not DYNAMIC_RELAY_URL:
-        return None, {"error": "Local engine offline — tunnel not connected"}, 503
+        return None, {"error": "Local engine offline — start the launcher on your machine"}, 503
     try:
         resp = requests.request(
             method, DYNAMIC_RELAY_URL.rstrip("/") + path,
@@ -336,7 +336,23 @@ def relay_request(path, method="GET", body=None):
             },
             json=body, timeout=20
         )
-        return resp, resp.json(), resp.status_code
+        # Guard: if the tunnel/proxy returned an HTML error page (e.g. Cloudflare
+        # 502/524 when the local bridge is down) resp.json() would raise a
+        # JSONDecodeError.  Catch it and return a human-readable error instead.
+        try:
+            data = resp.json()
+        except Exception:
+            data = {
+                "error": (
+                    f"Bridge returned a non-JSON response (HTTP {resp.status_code}). "
+                    "The local encryption bridge may be down — check the launcher."
+                )
+            }
+        return resp, data, resp.status_code
+    except requests.exceptions.ConnectionError:
+        return None, {"error": "Cannot reach the local bridge — is the launcher running?"}, 503
+    except requests.exceptions.Timeout:
+        return None, {"error": "Bridge timed out — the local machine may be overloaded"}, 504
     except Exception as e:
         return None, {"error": str(e)}, 500
 
@@ -1016,7 +1032,7 @@ function togglePw(id,btn){const el=document.getElementById(id);el.type=el.type==
 async function doRegister(){const email=document.getElementById('reg-email').value.trim();const pw=document.getElementById('reg-pw').value;const name=document.getElementById('reg-name').value.trim();const msg=document.getElementById('reg-msg'),btn=document.getElementById('reg-btn');if(!email||!email.includes('@')){setMsg(msg,'Enter a valid email','err');return}if(!pw||pw.length<6){setMsg(msg,'Password must be at least 6 characters','err');return}btn.disabled=true;setMsg(msg,'Creating account…','');const{ok,data}=await apiFetch('/v1/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password:pw,name})});if(ok){saveSession({email,name:data.name||name||email.split('@')[0],tier:data.tier,quota:data.quota});showNewKey(data.api_key);updateNavUser();document.getElementById('auth-widget').style.display='none'}else{setMsg(msg,'✗ '+(data.error||'Registration failed'),'err');btn.disabled=false}}
 async function doLogin(){const email=document.getElementById('log-email').value.trim();const pw=document.getElementById('log-pw').value;const msg=document.getElementById('log-msg'),btn=document.getElementById('log-btn');if(!email||!pw){setMsg(msg,'Email and password required','err');return}btn.disabled=true;setMsg(msg,'Logging in…','');const{ok,data}=await apiFetch('/v1/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password:pw})});if(ok){saveSession({email,name:data.name,tier:data.tier,quota:data.quota,keyPrefix:data.key_prefix,keyCreated:data.key_created});document.getElementById('auth-widget').style.display='none';showLoginSuccess(data);updateNavUser()}else{setMsg(msg,'✗ '+(data.error||'Login failed'),'err');btn.disabled=false}}
 function doLogout(){clearSession();_key='';sessionStorage.removeItem('ck_key');clearKey();document.getElementById('login-success').classList.remove('show');document.getElementById('key-result').classList.remove('show');document.getElementById('auth-widget').style.display='block';document.getElementById('reg-btn').disabled=false;document.getElementById('log-btn').disabled=false;document.getElementById('reg-msg').textContent='Free · 100 calls/day · No credit card';document.getElementById('reg-msg').className='aw-msg';updateNavUser()}
-async function doRotate(){if(!_session){alert('You must be logged in.');return}const pw=prompt('Enter your password to confirm key rotation:');if(!pw)return;const{ok,data}=await apiFetch('/v1/rotate_key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:_session.email,password:pw})});if(ok){document.getElementById('login-success').classList.remove('show');showNewKey(data.api_key);_key=data.api_key;sessionStorage.setItem('ck_key',_key)}else{alert('✗ '+(data.error||'Rotation failed'))}}
+async function doRotate(){if(!_session){alert('You must be logged in.');return}const pw=prompt('Enter your password to confirm key rotation:');if(!pw)return;const{ok,data}=await apiFetch('/v1/rotate_key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:_session.email,password:pw})});if(ok){document.getElementById('login-success').classList.remove('show');showNewKey(data.api_key);_key=data.api_key;sessionStorage.setItem('ck_key',_key);activateKeyValue(_key)}else{alert('✗ '+(data.error||'Rotation failed'))}}
 function updateNavUser(){const btn=document.getElementById('nav-user-btn');if(_session){btn.style.display='block';btn.textContent=_session.email.split('@')[0]}else{btn.style.display='none'}}
 function handleNavUser(){if(_session)doLogout()}
 function showNewKey(apiKey){document.getElementById('kr-key-text').textContent=apiKey;document.getElementById('key-result').classList.add('show')}
@@ -1038,7 +1054,10 @@ document.getElementById('log-pw').addEventListener('keydown',e=>{if(e.key==='Ent
 async function doEncrypt(){const plain=document.getElementById('enc-input').value.trim(),out=document.getElementById('enc-output');if(!plain){out.value='⚠ Enter some text first.';out.className='out err';return}out.value='Encrypting…';out.className='out';const{ok,data}=await apiFetch('/v1/encrypt',{method:'POST',headers:{'Authorization':'Bearer '+_key,'Content-Type':'application/json'},body:JSON.stringify({plaintext:plain})});if(ok){out.value=JSON.stringify(data,null,2);out.className='out';document.getElementById('dec-input').value=JSON.stringify(data,null,2)}else{out.value='✗ '+(data.error||JSON.stringify(data));out.className='out err'}}
 async function doDecrypt(){const raw=document.getElementById('dec-input').value.trim(),out=document.getElementById('dec-output');if(!raw){out.value='⚠ Paste ciphertext JSON first.';out.className='out err';return}let body;try{body=JSON.parse(raw)}catch(e){out.value='✗ Invalid JSON.';out.className='out err';return}if(!body.ciphertext||!body.nonce||!body.encryption_key){out.value='✗ JSON needs "ciphertext", "nonce", and "encryption_key".';out.className='out err';return}out.value='Decrypting…';out.className='out teal';const{ok,data}=await apiFetch('/v1/decrypt',{method:'POST',headers:{'Authorization':'Bearer '+_key,'Content-Type':'application/json'},body:JSON.stringify({ciphertext:body.ciphertext,nonce:body.nonce,encryption_key:body.encryption_key})});if(ok){out.value=data.plaintext??JSON.stringify(data);out.className='out teal'}else{out.value='✗ '+(data.error||JSON.stringify(data));out.className='out err'}}
 async function exportChaosKey(){const out=document.getElementById('export-output');out.style.display='block';out.value='Requesting master key...';out.className='out';const{ok,data}=await apiFetch('/v1/export_key',{method:'GET',headers:{'Authorization':'Bearer '+_key}});if(ok){out.value=data.chaos_key??JSON.stringify(data)}else{out.value='✗ '+(data.error||JSON.stringify(data));out.className='out err'}}
-async function apiFetch(path,opts){const r=await fetch(path,opts),ct=r.headers.get('Content-Type')||'';let data;if(ct.includes('application/json')){data=await r.json()}else{const t=await r.text();const m=t.match(/<title>([^<]*)<\/title>/i);data={error:m?m[1]:'HTTP '+r.status}}return{ok:r.ok,status:r.status,data}}
+async function apiFetch(path,opts){const r=await fetch(path,opts),ct=r.headers.get('Content-Type')||'';let data;if(ct.includes('application/json')){data=await r.json()}else{const t=await r.text();const m=t.match(/<title>([^<]*)<\/title>/i);data={error:m?m[1]:'HTTP '+r.status}}
+// If key was revoked, clear it and prompt user to get a new one
+if(!r.ok&&data&&data.error&&data.error.toLowerCase().includes('revoked')){clearKey();data={error:'Your API key was revoked. Please rotate your key above to get a new one.'}}
+return{ok:r.ok,status:r.status,data}}
 function cpCode(btn,id){navigator.clipboard.writeText(document.getElementById(id).innerText).then(()=>{btn.textContent='copied!';btn.classList.add('ok');setTimeout(()=>{btn.textContent='copy';btn.classList.remove('ok')},2000)})}
 const sro=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');sro.unobserve(e.target)}})},{threshold:.07});
 document.querySelectorAll('.sr').forEach(el=>sro.observe(el));
