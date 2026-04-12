@@ -46,7 +46,7 @@ RELAY_TOKEN       = os.getenv("RELAY_TOKEN", "7c9a2f1b8e4d0a92b3c4d5e6f7a8b9c0")
 ADMIN_SECRET      = os.getenv("ADMIN_SECRET", "change-me-in-production")
 DATABASE_URL      = os.getenv("DATABASE_URL", "")
 DB_PATH           = os.getenv("DB_PATH", "")
-DYNAMIC_RELAY_URL = os.getenv("RELAY_URL", "")
+DYNAMIC_RELAY_URL = os.getenv("RELAY_URL", "http://localhost:5005")
 
 ADMIN_EMAIL       = os.getenv("ADMIN_EMAIL", "admin@admin.com")
 ADMIN_PASSWORD    = os.getenv("ADMIN_PASSWORD", "")
@@ -60,7 +60,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("CryptoAPI")
 
 app = Flask("CryptoAPI")
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
 
 # ── Database abstraction (PostgreSQL or SQLite) ───────────────────────────────
 USE_POSTGRES = bool(DATABASE_URL)
@@ -333,7 +333,6 @@ def relay_request(path, method="GET", body=None):
             headers={
                 "X-Relay-Token": RELAY_TOKEN,
                 "Content-Type": "application/json",
-                "ngrok-skip-browser-warning": "true",
             },
             json=body, timeout=20
         )
