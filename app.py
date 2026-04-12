@@ -80,7 +80,7 @@ if USE_POSTGRES:
             _pool = ThreadedConnectionPool(1, 10, url, sslmode="require")
         return _pool
 # CHANGED TO START THE DB AFTER DROP
-   def get_db():
+  def get_db():
     if "db" not in g:
         conn = get_pool().getconn()
         # Validate the connection is alive (Neon drops idle ones)
