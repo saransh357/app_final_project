@@ -2,13 +2,15 @@
 CryptoAPI — Key Issuance & Encryption-as-a-Service
 ====================================================
 Changes from original:
-  - PostgreSQL support via DATABASE_URL (persistent on Render free tier)
+  - PostgreSQL support via DATABASE_URL (Neon serverless compatible)
   - SQLite fallback for local development
   - Admin tier with unlimited quota + special admin endpoints
   - Admin account seeded automatically from env vars on first boot
   - Daily quota removed for admin tier
   - Passwords: bcrypt with fallback to sha256
   - All original security fixes retained
+  - FIXED: Removed ThreadedConnectionPool — direct per-request connections
+    for Neon serverless compatibility (no pool exhaustion)
 """
 
 import os, secrets, hashlib, hmac, time, logging
@@ -42,17 +44,16 @@ except ImportError:
 # ── Config ────────────────────────────────────────────────────────────────────
 RELAY_TOKEN       = os.getenv("RELAY_TOKEN", "7c9a2f1b8e4d0a92b3c4d5e6f7a8b9c0")
 ADMIN_SECRET      = os.getenv("ADMIN_SECRET", "change-me-in-production")
-DATABASE_URL      = os.getenv("DATABASE_URL", "")          # Render PostgreSQL URL
-DB_PATH           = os.getenv("DB_PATH", "")   # SQLite fallback
+DATABASE_URL      = os.getenv("DATABASE_URL", "")
+DB_PATH           = os.getenv("DB_PATH", "")
 DYNAMIC_RELAY_URL = os.getenv("RELAY_URL", "")
 
-# Admin seed — set these in Render environment variables
 ADMIN_EMAIL       = os.getenv("ADMIN_EMAIL", "admin@admin.com")
-ADMIN_PASSWORD    = os.getenv("ADMIN_PASSWORD", "")        # MUST set in env
+ADMIN_PASSWORD    = os.getenv("ADMIN_PASSWORD", "")
 
 FREE_QUOTA_DAY  = 100
 PRO_QUOTA_DAY   = 10_000
-ADMIN_QUOTA_DAY = 999_999_999                              # effectively unlimited
+ADMIN_QUOTA_DAY = 999_999_999
 KEY_PREFIX      = "ck_live_"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -67,28 +68,17 @@ USE_POSTGRES = bool(DATABASE_URL)
 if USE_POSTGRES:
     import psycopg2
     import psycopg2.extras
-    from psycopg2.pool import ThreadedConnectionPool
-    _pool = None
 
-    def get_pool():
-        global _pool
-        if _pool is None:
-            url = DATABASE_URL
-            if url.startswith("postgres://"):
-                url = url.replace("postgres://", "postgresql://", 1)
-            _pool = ThreadedConnectionPool(1, 10, url, sslmode="require")
-        return _pool
+    def _make_conn():
+        url = DATABASE_URL
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql://", 1)
+        return psycopg2.connect(url)
 
     def get_db():
         if "db" not in g:
-            conn = get_pool().getconn()
-            try:
-                conn.cursor().execute("SELECT 1")
-            except Exception:
-                get_pool().putconn(conn, close=True)
-                conn = get_pool().getconn()
-            conn.autocommit = False
-            g.db = conn
+            g.db = _make_conn()
+            g.db.autocommit = False
         return g.db
 
     @app.teardown_appcontext
@@ -99,9 +89,10 @@ if USE_POSTGRES:
                 db.rollback()
             else:
                 db.commit()
-            get_pool().putconn(db)
+            db.close()
 
     def db_execute(sql, params=()):
+        """Execute and return cursor (PostgreSQL uses %s placeholders)."""
         sql = sql.replace("?", "%s")
         cur = get_db().cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(sql, params)
@@ -116,6 +107,7 @@ if USE_POSTGRES:
 
     AUTOINCREMENT = "SERIAL PRIMARY KEY"
     ON_CONFLICT_UPDATE = "ON CONFLICT (key_id, day) DO UPDATE SET count = daily_counts.count + 1"
+
 else:
     import sqlite3
 
@@ -190,10 +182,9 @@ def init_db():
             url = DATABASE_URL
             if url.startswith("postgres://"):
                 url = url.replace("postgres://", "postgresql://", 1)
-            conn = psycopg2.connect(url, sslmode="require")
+            conn = psycopg2.connect(url)
             conn.autocommit = True
             cur = conn.cursor()
-            # Execute each statement separately for PostgreSQL
             for stmt in get_schema().split(";"):
                 stmt = stmt.strip()
                 if stmt:
@@ -201,7 +192,6 @@ def init_db():
                         cur.execute(stmt)
                     except Exception as e:
                         log.warning(f"Schema stmt skipped: {e}")
-            # Migrate: add password_hash if missing
             try:
                 cur.execute("ALTER TABLE customers ADD COLUMN IF NOT EXISTS password_hash TEXT")
             except Exception:
@@ -218,7 +208,6 @@ def init_db():
             db.commit()
             db.close()
 
-        # Seed admin account
         _seed_admin()
 
 
@@ -234,7 +223,6 @@ def _seed_admin():
         ).fetchone()
 
         if existing:
-            # Update tier to admin in case it was downgraded
             db_execute(
                 "UPDATE customers SET tier = 'admin', password_hash = ? WHERE email = ?",
                 (hash_password(ADMIN_PASSWORD), ADMIN_EMAIL)
@@ -260,7 +248,7 @@ def _seed_admin():
         )
         db_commit()
         log.info(f"[Init] Admin account created: {ADMIN_EMAIL}")
-        log.info(f"[Init] Admin API key: {raw_key}")   # shown once in boot logs only
+        log.info(f"[Init] Admin API key: {raw_key}")
 
     except Exception as e:
         log.error(f"[Init] Failed to seed admin: {e}")
@@ -297,7 +285,6 @@ def require_api_key(f):
         if row["revoked_at"]:     return jsonify({"error": "API key revoked"}), 401
         if not row["active"]:     return jsonify({"error": "Account suspended"}), 403
 
-        # Admin tier bypasses quota check entirely
         if row["tier"] != "admin":
             quota = quota_for_tier(row["tier"])
             cnt = db_execute(
@@ -375,7 +362,6 @@ def err500(e): return jsonify({"error": "Internal server error", "detail": str(e
 # ════════════════════════════════════════════════════════════════
 
 def admin_auth():
-    """Returns True if the request carries the correct admin secret."""
     return hmac.compare_digest(
         request.headers.get("X-Admin-Secret", ""), ADMIN_SECRET
     )
@@ -394,7 +380,6 @@ def set_relay():
 
 @app.route("/admin/register", methods=["POST"])
 def admin_register():
-    """Create any user with any tier, including admin."""
     if not admin_auth(): abort(403)
     body  = request.get_json(force=True) or {}
     email = body.get("email", "").strip().lower()
@@ -437,7 +422,6 @@ def admin_customers():
 
 @app.route("/admin/customers/<int:cid>/tier", methods=["PATCH"])
 def admin_set_tier(cid):
-    """Upgrade/downgrade a user's tier."""
     if not admin_auth(): abort(403)
     tier = (request.get_json(force=True) or {}).get("tier")
     if tier not in ("free", "pro", "admin"):
@@ -465,7 +449,6 @@ def admin_unsuspend(cid):
 
 @app.route("/admin/customers/<int:cid>/keys", methods=["GET"])
 def admin_list_keys(cid):
-    """List all keys (active + revoked) for a customer."""
     if not admin_auth(): abort(403)
     rows = db_execute(
         "SELECT id, key_prefix, created_at, revoked_at, label FROM api_keys WHERE customer_id = ? ORDER BY id DESC",
@@ -477,8 +460,8 @@ def admin_list_keys(cid):
 @app.route("/admin/stats", methods=["GET"])
 def admin_stats():
     if not admin_auth(): abort(403)
-    total_req = db_execute("SELECT COUNT(*) as c FROM usage_log").fetchone()["c"]
-    today_req = db_execute("SELECT SUM(count) as c FROM daily_counts WHERE day = ?", (today(),)).fetchone()["c"]
+    total_req  = db_execute("SELECT COUNT(*) as c FROM usage_log").fetchone()["c"]
+    today_req  = db_execute("SELECT SUM(count) as c FROM daily_counts WHERE day = ?", (today(),)).fetchone()["c"]
     total_cust = db_execute("SELECT COUNT(*) as c FROM customers WHERE active = 1").fetchone()["c"]
     tier_breakdown = db_execute(
         "SELECT tier, COUNT(*) as c FROM customers WHERE active = 1 GROUP BY tier"
@@ -502,7 +485,6 @@ def admin_stats():
 
 @app.route("/admin/usage_log", methods=["GET"])
 def admin_usage_log():
-    """Last 200 API calls across all users."""
     if not admin_auth(): abort(403)
     rows = db_execute(
         "SELECT u.id, c.email, u.endpoint, u.ts, u.status, u.latency_ms "
@@ -738,7 +720,7 @@ def health():
     })
 
 
-# ── Dashboard HTML (unchanged from original) ──────────────────────────────────
+# ── Dashboard HTML ────────────────────────────────────────────────────────────
 DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1071,13 +1053,10 @@ def index():
     return render_template_string(DASHBOARD_HTML)
 
 
-# At the bottom of your app.py
 try:
     init_db()
 except Exception as e:
     log.error(f"CRITICAL: Database initialization failed: {e}")
-    # We don't exit(1) so the health check might still pass, 
-    # but the app will show errors when DB endpoints are hit.
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
