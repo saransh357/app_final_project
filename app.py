@@ -1077,4 +1077,4 @@ except Exception as e:
     # but the app will show errors when DB endpoints are hit.
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=False)
+    app.run(host="0.0.0.0", port=8000, debug=True)
