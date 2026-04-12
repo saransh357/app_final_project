@@ -74,25 +74,22 @@ if USE_POSTGRES:
         global _pool
         if _pool is None:
             url = DATABASE_URL
-            # Render provides postgres:// but psycopg2 needs postgresql://
             if url.startswith("postgres://"):
                 url = url.replace("postgres://", "postgresql://", 1)
             _pool = ThreadedConnectionPool(1, 10, url, sslmode="require")
         return _pool
-# CHANGED TO START THE DB AFTER DROP
-  def get_db():
-    if "db" not in g:
-        conn = get_pool().getconn()
-        # Validate the connection is alive (Neon drops idle ones)
-        try:
-            conn.cursor().execute("SELECT 1")
-        except Exception:
-            # Connection is dead — get a fresh one
-            get_pool().putconn(conn, close=True)
+
+    def get_db():
+        if "db" not in g:
             conn = get_pool().getconn()
-        conn.autocommit = False
-        g.db = conn
-    return g.db
+            try:
+                conn.cursor().execute("SELECT 1")
+            except Exception:
+                get_pool().putconn(conn, close=True)
+                conn = get_pool().getconn()
+            conn.autocommit = False
+            g.db = conn
+        return g.db
 
     @app.teardown_appcontext
     def close_db(exc):
@@ -105,7 +102,6 @@ if USE_POSTGRES:
             get_pool().putconn(db)
 
     def db_execute(sql, params=()):
-        """Execute and return cursor (PostgreSQL uses %s placeholders)."""
         sql = sql.replace("?", "%s")
         cur = get_db().cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(sql, params)
@@ -120,7 +116,6 @@ if USE_POSTGRES:
 
     AUTOINCREMENT = "SERIAL PRIMARY KEY"
     ON_CONFLICT_UPDATE = "ON CONFLICT (key_id, day) DO UPDATE SET count = daily_counts.count + 1"
-
 else:
     import sqlite3
 
