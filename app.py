@@ -42,7 +42,7 @@ except ImportError:
             return False
 
 # ── Config ────────────────────────────────────────────────────────────────────
-RELAY_TOKEN       = os.getenv("RELAY_TOKEN", "7c9a2f1b8e4d0a92b3c4d5e6f7a8b9c0")
+RELAY_TOKEN       = os.getenv("RELAY_TOKEN", "")
 ADMIN_SECRET      = os.getenv("ADMIN_SECRET", "")
 DATABASE_URL      = os.getenv("DATABASE_URL", "")
 DB_PATH           = os.getenv("DB_PATH", "")
