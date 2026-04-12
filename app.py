@@ -340,7 +340,11 @@ def relay_request(path, method="GET", body=None):
     try:
         resp = requests.request(
             method, DYNAMIC_RELAY_URL.rstrip("/") + path,
-            headers={"X-Relay-Token": RELAY_TOKEN, "Content-Type": "application/json"},
+            headers={
+                "X-Relay-Token": RELAY_TOKEN,
+                "Content-Type": "application/json",
+                "ngrok-skip-browser-warning": "true",
+            },
             json=body, timeout=20
         )
         return resp, resp.json(), resp.status_code
