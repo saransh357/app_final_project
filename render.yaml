@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: chaoskey-api
+    runtime: python
+    buildCommand: pip install -r requirements-cloud.txt
+    startCommand: python app.py
+    envVars:
+      - key: RELAY_TOKEN
+        generateValue: true
+      - key: ADMIN_SECRET
+        generateValue: true
+      - key: ADMIN_EMAIL
+        value: admin@yourdomain.com
+      - key: ADMIN_PASSWORD
+        sync: false           # set manually in Render dashboard — never commit
+      - key: DB_PATH
+        value: /data/chaoskey.db
+      - key: RELAY_URL
+        value: ""             # launcher will push this via /admin/set_relay on startup
+    disk:
+      name: chaoskey-data
+      mountPath: /data
+      sizeGB: 1

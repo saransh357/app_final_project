@@ -1,0 +1,14 @@
+# requirements-cloud.txt
+# Used by Render (or any cloud host) to run app.py only.
+# Does NOT include opencv, numpy, pyaudio — those are only needed locally
+# for the key generator.
+
+flask>=3.0
+flask-cors>=4.0
+requests>=2.31
+cryptography>=42.0
+bcrypt>=4.0
+gunicorn>=22.0          # production WSGI server for Render
+
+# Uncomment if you switch from SQLite to Neon/PostgreSQL:
+# psycopg2-binary>=2.9
