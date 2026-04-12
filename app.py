@@ -79,12 +79,20 @@ if USE_POSTGRES:
                 url = url.replace("postgres://", "postgresql://", 1)
             _pool = ThreadedConnectionPool(1, 10, url, sslmode="require")
         return _pool
-
-    def get_db():
-        if "db" not in g:
-            g.db = get_pool().getconn()
-            g.db.autocommit = False
-        return g.db
+# CHANGED TO START THE DB AFTER DROP
+   def get_db():
+    if "db" not in g:
+        conn = get_pool().getconn()
+        # Validate the connection is alive (Neon drops idle ones)
+        try:
+            conn.cursor().execute("SELECT 1")
+        except Exception:
+            # Connection is dead — get a fresh one
+            get_pool().putconn(conn, close=True)
+            conn = get_pool().getconn()
+        conn.autocommit = False
+        g.db = conn
+    return g.db
 
     @app.teardown_appcontext
     def close_db(exc):
