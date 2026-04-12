@@ -40,7 +40,7 @@ except ImportError:
             return False
 
 # ── Config ────────────────────────────────────────────────────────────────────
-RELAY_TOKEN       = os.getenv("RELAY_TOKEN", "60214a27a9f1ee39361b70b3fa8c98d6")
+RELAY_TOKEN       = os.getenv("RELAY_TOKEN", "7c9a2f1b8e4d0a92b3c4d5e6f7a8b9c0")
 ADMIN_SECRET      = os.getenv("ADMIN_SECRET", "change-me-in-production")
 DATABASE_URL      = os.getenv("DATABASE_URL", "")          # Render PostgreSQL URL
 DB_PATH           = os.getenv("DB_PATH", "")   # SQLite fallback
