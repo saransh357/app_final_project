@@ -51,7 +51,7 @@ DYNAMIC_RELAY_URL = os.getenv("RELAY_URL", "")
 ADMIN_EMAIL       = os.getenv("ADMIN_EMAIL", "admin@admin.com")
 ADMIN_PASSWORD    = os.getenv("ADMIN_PASSWORD", "")
 
-FREE_QUOTA_DAY  = 100
+FREE_QUOTA_DAY  = 1000
 PRO_QUOTA_DAY   = 10_000
 ADMIN_QUOTA_DAY = 999_999_999
 KEY_PREFIX      = "ck_live_"
