@@ -2891,7 +2891,4 @@ except Exception as e:
     log.error(f"DB init failed: {e}")
 
 if __name__ == "__main__":
-    log.info(f"BurnChat starting on port {PORT}")
-    log.info(f"ChaosKey URL: {CHAOSKEY_URL or '(not set)'}")
-    log.info("Every message encrypted by ChaosKey; enc_key RSA-OAEP wrapped per recipient.")
     app.run(host="0.0.0.0", port=PORT, debug=False)
